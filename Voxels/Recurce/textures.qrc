@@ -1,0 +1,15 @@
+<RCC>
+    <qresource prefix="/">
+        <file>cube1.png</file>
+        <file>cube2.png</file>
+        <file>cube3.png</file>
+        <file>Cube.png</file>
+        <file>UAV/UAV.png</file>
+        <file>Target.png</file>
+        <file>Drone 2/drone2_Atlas.png</file>
+        <file>Moon_Rover/14014_Moon_Rover_V1_Atlas.png</file>
+        <file>RС_Car/10600_RC_Car_SG_v1_diffuse.jpg</file>
+        <file>Aruco/4x4_1000-9.png</file>
+        <file>Aruco/4x4_1000-47.png</file>
+    </qresource>
+</RCC>

@@ -1,0 +1,12 @@
+<RCC>
+    <qresource prefix="/">
+        <file>UAV/UAV.mtl</file>
+        <file>UAV/UAV.obj</file>
+        <file>Moon_Rover/14014_Moon_Rover_V1_l1.mtl</file>
+        <file>Moon_Rover/14014_Moon_Rover_V1_l1.obj</file>
+        <file>Drone 2/drone2.mtl</file>
+        <file>Drone 2/drone2.obj</file>
+        <file>RС_Car/10600_RC_ Car_SG_v2_L3.mtl</file>
+        <file>RС_Car/10600_RC_ Car_SG_v2_L3.obj</file>
+    </qresource>
+</RCC>

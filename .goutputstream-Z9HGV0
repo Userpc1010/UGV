@@ -1,0 +1,5 @@
+TEMPLATE = subdirs
+
+SUBDIRS = UAV_Core SLAM
+
+UAV_Core.depends += SLAM
