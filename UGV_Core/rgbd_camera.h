@@ -61,22 +61,19 @@ public:
 
  std::atomic<bool> lattice_planning_in_progress_{false};
 
- uint8_t * voxels;
-
- uint8_t * costmap;
-
 CostmapColorizer * colorizer;
 
- uint32_t world_counter;
+uint32_t world_counter;
 
- uint16_t * serialization_point_1;
-
- uint16_t * serialization_point_2;
+ uint8_t  *dev_voxels;        // GPU-указатель на воксельную карту (16 МБ)
+ uint8_t  *dev_costmap;       // GPU-указатель на 2D costmap (1.6 МБ)
+ uint32_t *serialization_point;  // CPU-копия списка индексов для визуализации
+ uint8_t  *costmap;           // CPU-копия costmap (остаётся)
 
 private:
 
- const float Rotation_matrix[9] = {0.99973f, 0.00235f, -0.02316f, -0.00523f, 0.99212f, -0.12521f, 0.02269f, 0.12530f, 0.99186f};
- const float Translation[3] = {-0.025f, 0.090f, -0.090f}; //Ваше старое значение было -0.085. Когда мы прибавили к нему +0.06 (В вашем выводе из SDK было четко сказано: Tbc = 0.06), мы получили -0.025.
+ const float Rotation_matrix[9] = {0.999048f, 0.018916f, -0.0393044f, 0.0f, 0.901077f, -0.433659f, 0.0436194f, 0.433246f, 0.900219f};
+ const float Translation[3] = {-0.005f, 0.089f, 0.055f}; //Ваше старое значение было -0.065. Когда мы прибавили к нему +0.06 (В вашем выводе из SDK было четко сказано: Tbc = 0.005), мы получили -0.025.
 
  //ArucoPosition
  float Aruco_point[3] = {0};
@@ -109,8 +106,6 @@ private:
  // Declare object that handles camera pose calculations
 
  const int zero = 0;
-
- QVector<QVector3D> astar_points;
 
  odometry odom;
 
@@ -147,6 +142,29 @@ private:
 
  bool first_start = true;   //First Start True!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
+ double cam_offset_ms = 0.0;
+
+ uint64_t last_lidar_sync_time = 0;
+
+ uint64_t first_scan_lidar = 0;
+
+ uint64_t first_frame_camera = 0;
+
+ uint64_t last_scan_timebase = 0;
+
+ uint64_t frame_counter_at_last_timesync = 0;
+
+ bool has_lidar_time = false;
+
+ double phase_shifts [3] = {0};
+
+ uint64_t phase_counts [3] = {0};
+
+ // Переменная для хранения надежного аппаратного счетчика
+ unsigned long long hardware_frame_counter = 0;
+
+ int target_remainder = -1;       // -1 означает, что фаза еще не определена
+
   uint8_t state = 0;
 
   GLfloat * vertices_data;
@@ -157,6 +175,14 @@ private:
   QVector3D m_accumulatedOffset;  // Накопленное смещение
 
   QVector3D m_lastMapOffset;      // Последнее отправленное смещение
+
+  // === Буфер синхронизированного кадра камеры (RGB-D) ===
+  std::mutex imu_mutex;
+  std::mutex color_mutex;
+  rs2::frame pending_depth_frame_;
+  rs2::frame pending_color_frame_;
+  float pending_depth_scale_ = 0.0f;
+  std::atomic<uint8_t> image_ready_{0};   // 0 = нет, 1 = готов (записан в pending_*), 2 = забран для aruco
 
 private:
 
@@ -196,10 +222,6 @@ protected:
 
  void DrawAruco (QVector3D pos);
 
- void manual_points (QVector<QVector3D> data);
-
- void VoxelsMapOut (const uint16_t * depth, float depth_scale);
-
  void ArucoTrackerOut(std::vector<std::vector<cv::Point2f>> corners);
 
  void DisplayingCubes(GLfloat* vertices_buffer, GLfloat* color_buffer, unsigned long long counter, QQuaternion rotation);
@@ -208,33 +230,29 @@ protected:
 
  void updateMapOffset(QVector3D offset);
 
- void ClearLine ();
-
  void grab_imu (rs2_vector v_gyro_data, double v_gyro_timestamp,rs2_vector v_accel_data, double v_accel_timestamp);
 
  void grab_stereo_camera(cv::Mat im, cv::Mat imRight, double timestamp, uint16_t width_img, uint16_t height_img);
 
  void input_track (double timestamp);
 
+ void camsync(double time);
+
 // void rotation (QQuaternion rotation);
 
 public slots:
 
-   void VoxelsMapIn (const uint16_t * depth, float depth_scale);
+   void point_cloud_lidar (const uint16_t * keyframe_pcl, uint32_t size_keyframe, const int16_t * lidar_pcl, uint32_t size_pcl);
 
    void ArucoTrackerIn (std::vector<std::vector<cv::Point2f>> corners);
 
-   //void output_track (OpenVins_Data data);
-
    void odometry_lidar (odometry data);
-
-   void RayCastPosition (QVector3D CameraPos, QVector2D CameraRot);
 
    void goalPositionSet(QVector3D position, QQuaternion rotation);
 
-   void reset();
-
    void WindowState (uint8_t state);
+
+   void timesync(uint64_t timebase, uint64_t time);
 
 };
 

@@ -94,9 +94,9 @@ quadbike_controller::quadbike_controller(QObject *parent)
     }
 
     // Таймер UART (200 Гц = 5 мс)
-    timer_uart = new QTimer(this);
-    connect(timer_uart, &QTimer::timeout, this, &quadbike_controller::UART4_timer);
-    timer_uart->start(5);
+//    timer_uart = new QTimer(this);
+//    connect(timer_uart, &QTimer::timeout, this, &quadbike_controller::UART4_timer);
+//    timer_uart->start(5);
 
     // Сразу отправляем режим MANUAL
     sendMode(CTRL_MODE_MANUAL);

@@ -1,11 +1,16 @@
-#include "livoxsdk.h"
+﻿#include "livoxsdk.h"
 
 
 class LivoxSDK;
 LivoxSDK * mapping = nullptr;
 
 LivoxSDK::LivoxSDK(const std::string config_path, QObject *parent)
-{
+{  
+  time_stabilized = false;
+  last = 0;
+  start_l = true;
+  lock_ = false;
+  Last_upd = 0;
 
   pcl_thread = std::thread( &LivoxSDK::callbackPointCloud, this);
   imu_thread = std::thread( &LivoxSDK::callbackImu, this);
@@ -39,6 +44,12 @@ LivoxSDK::~LivoxSDK()
 
   if(pcl_thread.joinable()) pcl_thread.detach();
   if(pcl_thread.joinable()) imu_thread.detach();
+}
+
+void LivoxSDK::camsync(double time)
+{
+    cam_offset = time;
+    time_stabilized = true;
 }
 
 void LivoxSDK::callbackPointCloud2(const CustomMsg msg)
@@ -96,6 +107,11 @@ void LivoxSDK::PointCloudCallback(uint32_t handle, const uint8_t dev_type, Livox
        return;
      }
 
+    if (!time_stabilized) {
+      // Ждём скачка, ничего не накапливаем
+      return;
+    }
+
      if(lock_){lock_ = false; customMsg.points.clear(); customMsg.point_num = 0;}
 
     // printf("point cloud handle: %u, data_num: %d, data_type: %d, length: %d, frame_counter: %d\n",handle, data->dot_num, data->data_type, data->length, data->frame_cnt);
@@ -106,7 +122,7 @@ void LivoxSDK::PointCloudCallback(uint32_t handle, const uint8_t dev_type, Livox
 
      if (data->data_type == kLivoxLidarCartesianCoordinateHighData) {
 
-       uint64_t timestamp = GetEthPacketTimestamp(data->time_type, data->timestamp, sizeof(data->timestamp));
+       uint64_t timestamp = GetEthPacketTimestamp(handle, data->time_type, data->timestamp, sizeof(data->timestamp));
 
        LivoxLidarCartesianHighRawPoint *p_point_data = (LivoxLidarCartesianHighRawPoint *)data->data;
 
@@ -132,6 +148,11 @@ void LivoxSDK::PointCloudCallback(uint32_t handle, const uint8_t dev_type, Livox
 
        if (timestamp - last >= 100000000)
        {
+
+         uint64_t scan_start_time = customMsg.points.at(0).offset_time;
+
+         emit mapping->timesync(scan_start_time, (scan_start_time + 100000000) + (int64_t)TARGET_PHASE_NS);
+
          customMsg.header.stamp = Time(timestamp / 1000000000.0);
 
          //customMsg.header = fromSec_pcl(static_cast<double>(timestamp) / 1000000000.0);  //To Sec ROS
@@ -141,15 +162,16 @@ void LivoxSDK::PointCloudCallback(uint32_t handle, const uint8_t dev_type, Livox
          lock_ = true;
          customMsg.lidar_id = handle;
          customMsg.header.msg_seq++;
-         customMsg.timebase = customMsg.points.at(0).offset_time;
+         customMsg.timebase = scan_start_time;
 
-         mapping->callbackPointCloud2(customMsg);
+         emit mapping->callbackPointCloud2(customMsg);
 
          last += 100000000;
        }
 
    }
 }
+
 
 void LivoxSDK::ImuDataCallback(uint32_t handle, const uint8_t dev_type, LivoxLidarEthernetPacket *data, void *client_data)
 {
@@ -161,11 +183,15 @@ void LivoxSDK::ImuDataCallback(uint32_t handle, const uint8_t dev_type, LivoxLid
 
     if (data->data_type == kLivoxLidarImuData) {
 
+        uint64_t timestamp = GetEthPacketTimestamp(handle, data->time_type, data->timestamp, sizeof(data->timestamp));
 
-        uint64_t timestamp = GetEthPacketTimestamp(data->time_type, data->timestamp, sizeof(data->timestamp));
+        if (!time_stabilized) {
+               // Ждём скачка, ничего не накапливаем
+               return;
+        }
 
-        if(((timestamp - Last_upd) / 1000.0) < 2000 ) { Last_upd = timestamp; timestamp += 2000 - ((timestamp - Last_upd) / 1000.0); }
-        else Last_upd = timestamp;
+        if(((timestamp - Last_upd) / 1000.0) < 2000 ) { Last_upd += 5000000; timestamp += 2000 - ((timestamp - Last_upd) / 1000.0); }
+        else Last_upd += 5000000;
 
         LivoxLidarImuRawPoint *p_point_data = (LivoxLidarImuRawPoint *)data->data;
 
@@ -187,18 +213,25 @@ void LivoxSDK::ImuDataCallback(uint32_t handle, const uint8_t dev_type, LivoxLid
         imu.linear_acceleration[1] = p_point_data->acc_y;
         imu.linear_acceleration[2] = p_point_data->acc_z;
 
-        mapping->callbackImu2(imu);
+        emit mapping->callbackImu2(imu);
 
         //printf("Imu data callback acc_x:%f, acc_y:%f, acc_z:%f, time:%u, dot_num:%u.\n", handle, p_point_data->acc_x, p_point_data->acc_y, p_point_data->acc_z, timestamp, data->dot_num);
     }
 }
 
-uint64_t LivoxSDK::GetEthPacketTimestamp(uint8_t timestamp_type, uint8_t *time_stamp, uint8_t size)
+uint64_t LivoxSDK::GetEthPacketTimestamp(uint32_t handle, uint8_t timestamp_type, uint8_t *time_stamp, uint8_t size)
 {
-  LdsStamp time;
-  memcpy(time.stamp_bytes, time_stamp, size);
+    LdsStamp time;
+    memcpy(time.stamp_bytes, time_stamp, size);
 
-  if (timestamp_type == kTimestampTypeGptpOrPtp || timestamp_type == kTimestampTypeGps) return time.stamp;
+    if (time_stabilized)
+    {
+        // Дельта = время камеры - текущее время лидара
+        double delta_ns = cam_offset - time.stamp;
 
-  return std::chrono::high_resolution_clock::now().time_since_epoch().count();
+        // Корректируем время лидара на эту дельту + фазовый сдвиг
+        return time.stamp + (int64_t)delta_ns - (int64_t)TARGET_PHASE_NS;
+    }
+
+    return time.stamp;
 }

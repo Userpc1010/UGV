@@ -22,6 +22,14 @@ public:
 
     dlio::OdomNode Node;
 
+signals:
+
+    void timesync(uint64_t timebase, uint64_t time);
+
+public slots:
+
+     void camsync(double time);
+
 private:
 
     void callbackPointCloud2(const CustomMsg msg);
@@ -33,7 +41,7 @@ private:
     static void PointCloudCallback(uint32_t handle, const uint8_t dev_type, LivoxLidarEthernetPacket *data, void *client_data);
     static void ImuDataCallback(uint32_t handle, const uint8_t dev_type, LivoxLidarEthernetPacket *data, void *client_data);
 
-    static uint64_t GetEthPacketTimestamp(uint8_t timestamp_type, uint8_t* time_stamp, uint8_t size);
+    static uint64_t GetEthPacketTimestamp(uint32_t handle, uint8_t timestamp_type, uint8_t *time_stamp, uint8_t size);
 
     // Threads
     std::thread imu_thread;
@@ -54,13 +62,20 @@ private:
     static inline const uint8_t kLineNumberMid360 = 4;
     static inline const uint8_t kLineNumberHAP = 6;
 
-    static inline uint64_t last = 0.0;
+    static inline uint64_t last = 0;
+
+    static inline double cam_offset = 0;
 
     static inline CustomMsg customMsg;
 
     static inline bool lock_ = false;
 
     static inline bool start_l = true;
+
+    static inline bool time_stabilized = false;
+
+    // Целевой сдвиг фазы: 11.5 мс = 11 500 000 наносекунд
+    static inline const uint64_t TARGET_PHASE_NS = 11500000ULL;
 
     std::string path;
 

@@ -18,11 +18,10 @@ MainWindow::MainWindow(QWidget *parent) :
 //  std::string config_path = "/home/sencis/build-UGV-Desktop-Debug/UAV_Core/estimator_config.yaml";
   std::string config_path = "/home/sencis/build-UGV-Desktop-Debug/FAST-LIO2/MID360_config.json";
 
-  thread_Processor = new QThread(this);
-  processor = new Processor (nullptr);
-  processor->moveToThread(thread_Processor);
-  processor->start(QThread::NormalPriority);
-  thread_Processor->start(QThread::NormalPriority);
+  thread_Lidar = new QThread(this);
+  SDK = new LivoxSDK(config_path, nullptr);
+  SDK->moveToThread(thread_Lidar);
+  thread_Lidar->start(QThread::HighPriority);
 
 // this->setCentralWidget(processor->Wiget);
 // processor->Wiget->setFocusPolicy(Qt::StrongFocus);
@@ -54,6 +53,9 @@ MainWindow::MainWindow(QWidget *parent) :
   qRegisterMetaType< rs2_vector >("rs2_vector");
   qRegisterMetaType< odometry >("odometry");
   qRegisterMetaType< uint16_t >("uint16_t");
+  qRegisterMetaType< uint32_t >("uint32_t");
+  qRegisterMetaType< uint64_t >("uint64_t");
+  qRegisterMetaType< uint64_t >("int64_t");
   qRegisterMetaType< GUI_telem >("GUI_telem");
   qRegisterMetaType< uint8_t >("uint8_t");
   qRegisterMetaType< GLfloat >("GLfloat");
@@ -85,24 +87,30 @@ MainWindow::MainWindow(QWidget *parent) :
 //    lidarmap->start(QThread::NormalPriority);
 //    thread_Lidar->start(QThread::NormalPriority);
 
-//      thread_Lidar = new QThread(this);
-//      SDK = new LivoxSDK(config_path, nullptr);
-//      SDK->moveToThread(thread_Lidar);
-//      thread_Lidar->start(QThread::HighPriority);
+    thread_Processor = new QThread(this);
+    processor = new Processor (nullptr);
+    processor->moveToThread(thread_Processor);
+    processor->start(QThread::NormalPriority);
+    thread_Processor->start(QThread::NormalPriority);
 
 
-//    connect(&SDK->Node, SIGNAL(DisplayingPoint(GLfloat*, GLfloat*,unsigned long long,QQuaternion, QVector3D)),                                 widgetLidar, SLOT(DisplayingPoint(GLfloat*,GLfloat*,unsigned long long,QQuaternion, QVector3D)));
-//    connect(&SDK->Node, SIGNAL(DisplayingPointMap(GLfloat*, GLfloat*,unsigned long long)),                                                     widgetLidar, SLOT(DisplayingMapPoint(GLfloat*,GLfloat*,unsigned long long)));
+    connect(&SDK->Node, SIGNAL(DisplayingPoint(GLfloat*, GLfloat*,unsigned long long,QQuaternion, QVector3D)),                                   widgetLidar, SLOT(DisplayingPoint(GLfloat*,GLfloat*,unsigned long long,QQuaternion, QVector3D)));
+
+    connect(&SDK->Node, SIGNAL(DisplayingPointMap(GLfloat*, GLfloat*,unsigned long long)),                                                       widgetLidar, SLOT(DisplayingMapPoint(GLfloat*,GLfloat*,unsigned long long)));
+
+    connect(SDK, SIGNAL(timesync(uint64_t, uint64_t)),                                                                                           processor, SLOT(timesync(uint64_t, uint64_t)));
+
+    connect(processor, SIGNAL(camsync(double)),                                                                                                  SDK, SLOT(camsync(double)));
 
     connect(this, SIGNAL(destroyed(QObject*)),                                                                                                   thread_controller, SLOT(quit()));
 
     connect(this, SIGNAL(destroyed(QObject*)),                                                                                                   thread_Processor, SLOT(quit()));
 
-//    connect(&SDK->Node, SIGNAL(odometry_lidar(odometry)),                                                                                      processor,SLOT(odometry_lidar(odometry)));
+    connect(&SDK->Node, SIGNAL(point_cloud_lidar(const uint16_t*, uint32_t, const int16_t*, uint32_t)),                                          processor, SLOT(point_cloud_lidar(const uint16_t*, uint32_t, const int16_t*, uint32_t)));
 
-//    connect(&SDK->Node, SIGNAL(odometry_lidar(odometry)),                                                                                      controller,SLOT(odometry_lidar(odometry)));
+    connect(&SDK->Node, SIGNAL(odometry_lidar(odometry)),                                                                                        processor,SLOT(odometry_lidar(odometry)));
 
-    //connect(processor->astar, SIGNAL(PathToTarget(std::vector<PathPoint>)),                                                                    controller,SLOT(PathToTarget(std::vector<PathPoint>)));
+    connect(&SDK->Node, SIGNAL(odometry_lidar(odometry)),                                                                                        controller,SLOT(odometry_lidar(odometry)));
 
     connect(processor->state_lattice_, SIGNAL(costmapUpdated(const uint8_t*, int, int, float, float, float)),                                    controller, SLOT(updateCostmap(const uint8_t*, int, int, float, float, float)));
 
@@ -110,27 +118,15 @@ MainWindow::MainWindow(QWidget *parent) :
 
     connect(processor, SIGNAL(DisplayingCubes(GLfloat*, GLfloat*, unsigned long long, QQuaternion)),                                             widgetCamera, SLOT (DisplayingCubes(GLfloat*, GLfloat*, unsigned long long, QQuaternion)));
 
-    //connect(processor->astar, SIGNAL(DrawCube(QVector3D)),                                                                                     widgetCamera, SLOT(DrawCube(QVector3D)));
-
     connect(processor, SIGNAL(DisplayingCostMap(QImage, QQuaternion)),                                                                           widgetCostMap, SLOT(DisplayingCostMap(QImage, QQuaternion)));
 
     connect(processor->state_lattice_, SIGNAL(DrawLines(GLfloat*,QVector3D,unsigned long long,uint16_t)),                                        widgetCostMap, SLOT(DrawLines(GLfloat*,QVector3D,unsigned long long,uint16_t)));
-
-    //connect(processor->astar, SIGNAL(DrawLines(GLfloat*, QVector3D, unsigned long long, uint16_t)),                                            widgetCamera, SLOT(DrawLines(GLfloat*, QVector3D, unsigned long long, uint16_t)));
-
-    //connect(processor, SIGNAL (ClearLine()),                                                                                                   widgetCamera, SLOT(ClearLine()));
-
-    //connect(processor, SIGNAL(manual_points(QVector<QVector3D>)),                                                                              controller, SLOT(manual_points(QVector<QVector3D>)));
-
-    //connect(widgetCamera, SIGNAL(RayCastPosition(QVector3D,QVector2D)),                                                                        processor,SLOT(RayCastPosition(QVector3D,QVector2D)));
 
     connect(widgetCostMap, SIGNAL(goalPositionSet(QVector3D,QQuaternion)),                                                                       processor, SLOT(goalPositionSet(QVector3D,QQuaternion)));
 
     connect(processor,SIGNAL(DrawCube(QVector3D)),                                                                                               widgetCamera,SLOT(DrawCube(QVector3D)));
 
     connect(processor,SIGNAL(updateMapOffset(QVector3D)),                                                                                        widgetCamera,SLOT(updateMapOffset(QVector3D)));
-
-    //connect(widgetCamera,SIGNAL(reset()),                                                                                                      processor,SLOT(reset()));
 
     connect(processor, SIGNAL(DrawAruco(QVector3D)),                                                                                             widgetCamera, SLOT(DrawAruco(QVector3D)));
 
@@ -142,19 +138,15 @@ MainWindow::MainWindow(QWidget *parent) :
 
     connect(controller, SIGNAL(send_telem(GUI_telem)),                                                                                           this, SLOT(send_telem(GUI_telem)));
 
-    //connect(processor, SIGNAL(GetPathToTarget(uint16_t*,uint16_t*,uint8_t*)),                                                                  astar, SLOT(GetPathToTarget(uint16_t*,uint16_t*,uint8_t*)));
-
     connect(Server, SIGNAL(Server_to_Controller(QByteArray)),                                                                                    controller, SLOT(Server_to_Controller(QByteArray)));
 
     connect(this, SIGNAL(WindowState(uint8_t)),                                                                                                  processor, SLOT(WindowState(uint8_t)));
 
     connect(this, SIGNAL(WindowState(uint8_t)),                                                                                                  processor->state_lattice_, SLOT(WindowState(uint8_t)));
 
-//    connect(this, SIGNAL(ModeChanged(uint8_t)),                                                                                                controller, SLOT(onModeChanged(uint8_t)));
+    connect(this, SIGNAL(ModeChanged(uint8_t)),                                                                                                  controller, SLOT(onModeChanged(uint8_t)));
 
-//    connect(this, SIGNAL(WindowState(uint8_t)),                                                                                                processor->astar, SLOT(WindowState(uint8_t)));
-
-//    connect(this, SIGNAL(WindowState(uint8_t)),                                                                                                &SDK->Node, SLOT(WindowState(uint8_t)));
+    connect(this, SIGNAL(WindowState(uint8_t)),                                                                                                  &SDK->Node, SLOT(WindowState(uint8_t)));
 
 
 //  connect (Server, SIGNAL(Server_to_GPS(QByteArray)),                                                  gps, SLOT(Server_to_GPS(QByteArray)));

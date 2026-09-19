@@ -12,6 +12,14 @@
 
 #include "odom.h"
 
+#define Map_X 400
+#define Map_Y 100
+#define Map_Z 400
+#define Map_center_X 199
+#define Map_center_Y 49
+#define Map_center_Z 199
+#define Map_scale 10.0f
+
 dlio::OdomNode::OdomNode()  {
 
   this->getParams();
@@ -37,6 +45,10 @@ dlio::OdomNode::OdomNode()  {
   else {this->imu_calibrated = true;}
   this->deskew_status = false;
   this->deskew_size = 0;
+  this->keyframe_size = 0;
+
+  this->keyframe_pcl_data_lidar = nullptr;
+  this->current_scan_pcl_data_lidar = nullptr;
 
 //  this->lidar_sub = this->nh.subscribe("pointcloud", 1, &dlio::OdomNode::callbackPointCloud, this, ros::TransportHints().tcpNoDelay());
 //  this->imu_sub = this->nh.subscribe("imu", 1000,&dlio::OdomNode::callbackImu, this, ros::TransportHints().tcpNoDelay());
@@ -170,7 +182,16 @@ dlio::OdomNode::OdomNode()  {
 
 }
 
-dlio::OdomNode::~OdomNode() {}
+dlio::OdomNode::~OdomNode()
+{
+  if(ptr_guard_current_scan_pcl_data_lidar){ptr_guard_current_scan_pcl_data_lidar = false; delete [] current_scan_pcl_data_lidar;}
+  if(ptr_guard_keyframe_pcl_data_lidar){ptr_guard_keyframe_pcl_data_lidar = false; delete [] keyframe_pcl_data_lidar;}
+  if(ptr_guard_vertices_data_Map){ptr_guard_vertices_data_Map = false; delete [] vertices_data_Map;}
+  if(ptr_guard_color_data_Map){ ptr_guard_color_data_Map = false; delete [] color_data_Map;}
+  if(ptr_guard_vertices_data_lidar){ptr_guard_vertices_data_lidar = false; delete [] vertices_data_lidar;}
+  if(ptr_guard_color_data_lidar){ptr_guard_color_data_lidar = false; delete [] color_data_lidar;}
+
+}
 
 void dlio::OdomNode::getParams() {
 
@@ -223,7 +244,7 @@ void dlio::OdomNode::getParams() {
 
   // Dense map resolution
 //  ros::param::param<bool>("~dlio/map/dense/filtered", this->densemap_filtered_, true);
-  this->densemap_filtered_ = false;
+  this->densemap_filtered_ = true;
 
   // Wait until movement to publish map
 //  ros::param::param<bool>("~dlio/map/waitUntilMove", this->wait_until_move_, false);
@@ -237,7 +258,7 @@ void dlio::OdomNode::getParams() {
 //  ros::param::param<bool>("~dlio/pointcloud/voxelize", this->vf_use_, true);
 //  ros::param::param<double>("~dlio/odom/preprocessing/voxelFilter/res", this->vf_res_, 0.05);
   this->vf_use_ = true;
-  this->vf_res_ = 0.25;
+  this->vf_res_ = 0.10;
 
   // Adaptive Parameters
 //  ros::param::param<bool>("~dlio/adaptive", this->adaptive_params_, true);
@@ -430,17 +451,21 @@ void dlio::OdomNode::publishCloud(pcl::PointCloud<PointType>::ConstPtr published
        if (this->length_traversed < 0.1) { return; }
      }
 
+    pcl::PointCloud<PointType>::Ptr current_scan (boost::make_shared<pcl::PointCloud<PointType>>());
+
+    pcl::transformPointCloud (*published_cloud, *current_scan, T_cloud);
+
+    unsigned long long size = current_scan->points.size();
+
      if(state_windosw == 1)
      {
 
-     pcl::PointCloud<PointType>::Ptr deskewed_scan_t_ (boost::make_shared<pcl::PointCloud<PointType>>());
 
-     pcl::transformPointCloud (*published_cloud, *deskewed_scan_t_, T_cloud);
 
          if(ptr_guard_vertices_data_lidar){ptr_guard_vertices_data_lidar = false; delete [] vertices_data_lidar;}
          if(ptr_guard_color_data_lidar){ptr_guard_color_data_lidar = false; delete [] color_data_lidar;}
 
-         unsigned long long size = deskewed_scan_t_->points.size();
+
 
          COLOR c; float min = 0.0f, max = 255.0f;
 
@@ -450,11 +475,11 @@ void dlio::OdomNode::publishCloud(pcl::PointCloud<PointType>::ConstPtr published
 
          for (uint32_t i = 0; i < size; i++)
          {
-             vertices_data_lidar[i * 3] = 200.0f + deskewed_scan_t_->points[i].y * 100.0f;
-             vertices_data_lidar[i * 3 + 1] = -50.0f + deskewed_scan_t_->points[i].z * 100.0f;
-             vertices_data_lidar[i * 3 + 2] = -200.0f + deskewed_scan_t_->points[i].x * 100.0f;
+             vertices_data_lidar[i * 3] = 200.0f + current_scan->points[i].y * 100.0f;
+             vertices_data_lidar[i * 3 + 1] = -50.0f + current_scan->points[i].z * 100.0f;
+             vertices_data_lidar[i * 3 + 2] = -200.0f + current_scan->points[i].x * 100.0f;
 
-             c = GetColor(deskewed_scan_t_->points[i].intensity, min, max);
+             c = GetColor(current_scan->points[i].intensity, min, max);
 
              color_data_lidar[i * 3] = c.r;
              color_data_lidar[i * 3 + 1] = c.g;
@@ -464,6 +489,21 @@ void dlio::OdomNode::publishCloud(pcl::PointCloud<PointType>::ConstPtr published
           emit DisplayingPoint(vertices_data_lidar, color_data_lidar, size, QQuaternion(odom.z, odom.x, -odom.w, -odom.y), QVector3D(200.0f + odom.y_pos * 100.0f, -50.0f + odom.z_pos * 100.0f, -200.0f +odom.x_pos * 100.0f));
 
      }
+
+     if(ptr_guard_current_scan_pcl_data_lidar){ptr_guard_current_scan_pcl_data_lidar = false; delete [] current_scan_pcl_data_lidar;}
+
+     current_scan_pcl_data_lidar = new int16_t [3 * size]; ptr_guard_current_scan_pcl_data_lidar = true;
+
+     for (uint32_t i = 0; i < size; i++)
+     {
+       current_scan_pcl_data_lidar[i * 3] = -((current_scan->points[i].y - this->odom.y_pos) * Map_scale) + Map_center_X;
+       current_scan_pcl_data_lidar[i * 3 + 1] = -((current_scan->points[i].z - this->odom.z_pos) * Map_scale) + Map_center_Y;
+       current_scan_pcl_data_lidar[i * 3 + 2] = ((current_scan->points[i].x - this->odom.x_pos) * Map_scale) + Map_center_Z;
+     }
+     emit point_cloud_lidar(keyframe_pcl_data_lidar, keyframe_size, current_scan_pcl_data_lidar, size);
+
+     keyframe_size = 0;
+
 }
 
 void dlio::OdomNode::WindowState(uint8_t state)
@@ -473,6 +513,46 @@ void dlio::OdomNode::WindowState(uint8_t state)
 
 void dlio::OdomNode::publishKeyframe(std::pair<std::pair<Eigen::Vector3f, Eigen::Quaternionf>, pcl::PointCloud<PointType>::ConstPtr> kf) {
 
+    //     publish keyframe scan for map
+
+        if (this->vf_use_) {
+
+        if (kf.second->points.size() == kf.second->width * kf.second->height) {
+
+         uint32_t size  = kf.second->points.size();
+
+        if(ptr_guard_keyframe_pcl_data_lidar){ptr_guard_keyframe_pcl_data_lidar = false; delete [] keyframe_pcl_data_lidar;}
+
+
+        keyframe_pcl_data_lidar = new uint16_t [3 * size]; ptr_guard_keyframe_pcl_data_lidar = true;
+
+        for (uint32_t i = 0; i < size; i++)
+        {
+            keyframe_pcl_data_lidar[i * 3] = -((kf.second->points[i].y - kf.first.first[1]) * Map_scale) + Map_center_X;
+            keyframe_pcl_data_lidar[i * 3 + 1] = -((kf.second->points[i].z - kf.first.first[2]) * Map_scale) + Map_center_Y;
+            keyframe_pcl_data_lidar[i * 3 + 2] = ((kf.second->points[i].x - kf.first.first[0]) * Map_scale) + Map_center_Z;
+        }
+        keyframe_size = size;
+        }
+       } else {
+
+            uint32_t size = kf.second->points.size();
+
+            if(ptr_guard_keyframe_pcl_data_lidar){ptr_guard_keyframe_pcl_data_lidar = false; delete [] keyframe_pcl_data_lidar;}
+
+
+            keyframe_pcl_data_lidar = new uint16_t [3 * size]; ptr_guard_keyframe_pcl_data_lidar = true;
+
+            for (uint32_t i = 0; i < size; i++)
+            {
+                keyframe_pcl_data_lidar[i * 3] = -((kf.second->points[i].y - kf.first.first[1]) * Map_scale) + Map_center_X;
+                keyframe_pcl_data_lidar[i * 3 + 1] = -((kf.second->points[i].z - kf.first.first[2]) * Map_scale) + Map_center_Y;
+                keyframe_pcl_data_lidar[i * 3 + 2] = ((kf.second->points[i].x - kf.first.first[0]) * Map_scale) + Map_center_Z;
+            }
+
+            keyframe_size = size;
+
+       }
 }
 
 void dlio::OdomNode::getScanFromROS(const CustomMsg pc) {

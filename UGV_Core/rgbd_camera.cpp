@@ -6,7 +6,22 @@
 #include <time.h>
 
 extern "C"
-void deproject_depth_cuda(uint16_t **serialization_point_1, uint16_t *serialization_point_2, uint32_t * world_counter, uint8_t * voxels, uint8_t * costmap, const rs2_intrinsics & intrin, const uint16_t * depth, float depth_scale, double w, double x, double y, double z, int16_t x_, int16_t y_, int16_t z_);
+void init_cuda_map(uint8_t **dev_voxels, uint8_t **dev_costmap);
+
+extern "C"
+void cleanup_cuda_map(uint8_t *dev_voxels, uint8_t *dev_costmap);
+
+extern "C"
+void deproject_depth_cuda(uint32_t **serialization_point_1, uint32_t *world_counter, uint8_t *dev_voxels,
+                          const rs2_intrinsics &intrin, const uint16_t *depth, float depth_scale,
+                          double w, double x, double y, double z,
+                          int16_t x_, int16_t y_, int16_t z_,
+                          const uint16_t *keyframe_pcl, uint32_t keyframe_size,
+                          const int16_t  *lidar_pcl,    uint32_t lidar_size);
+
+extern "C"
+void process_costmap_cuda(uint8_t *dev_voxels, uint8_t *dev_costmap, uint8_t *costmap_host, int16_t current_y);
+
 
 uint32_t floatBitsToUint_memcpy(float f) {
     uint32_t u;
@@ -166,8 +181,6 @@ Processor::Processor(QObject *parent)
 {
     qRegisterMetaType< std::vector<std::vector<cv::Point2f>> >("std::vector<std::vector<cv::Point2f>>");
 
-    connect (this, SIGNAL(VoxelsMapOut(const uint16_t*,float)), this, SLOT (VoxelsMapIn(const uint16_t*,float)));
-
     connect(this, SIGNAL(ArucoTrackerOut(std::vector<std::vector<cv::Point2f>>)), this, SLOT(ArucoTrackerIn(std::vector<std::vector<cv::Point2f>>)));
 
      //astar = new Astar(this);
@@ -190,8 +203,10 @@ Processor::Processor(QObject *parent)
 
     world_counter = 0;
 
-    serialization_point_1 = NULL;
-    serialization_point_2 = NULL;
+    serialization_point = nullptr;
+    dev_voxels = nullptr;
+    dev_costmap = nullptr;
+    costmap = nullptr;
 
    // Create the dictionary from the same dictionary the marker was generated.
 //   cv::aruco::Dictionary dir = cv::aruco::getPredefinedDictionary(cv::aruco::PredefinedDictionaryType(cv::aruco::DICT_4X4_50));
@@ -202,9 +217,11 @@ Processor::~Processor()
 {
  process_rgbd = false;
  pipe.stop();
- delete [] voxels;
- if(sizeof(serialization_point_1)) delete [] serialization_point_1;
- if(sizeof(serialization_point_2)) delete [] serialization_point_2;
+ cleanup_cuda_map(dev_voxels, dev_costmap);
+ dev_voxels = nullptr;
+ dev_costmap = nullptr;
+ if (costmap) { delete[] costmap; costmap = nullptr; }
+ if (serialization_point) { free(serialization_point); serialization_point = nullptr; }
  if(ptr_guard_vertices_data){ ptr_guard_vertices_data = false; delete [] vertices_data;}
  if(ptr_guard_color_data){ptr_guard_color_data = false;  delete [] color_data;}
 }
@@ -249,31 +266,6 @@ void Processor::IMU_Get_Euler_Angle(Quat buff)
     yaw = yaw * RADTODEG;
 }
 
-void Processor::RayCastPosition(QVector3D CameraPos, QVector2D CameraRot)
-{
-  int dist = 0; float x = CameraPos.x(), y = -CameraPos.y(), z = -CameraPos.z();
-
-  int x_last = 0, y_last = 0, z_last = 0;
-
-  while(dist <90){
-
-    dist++;
-
-    x+= sin((CameraRot.y() + 90.0f)/180.0f * PI_) / 3; x = x/ 1.0f;
-            y+= -tan((CameraRot.x())/180.0f * PI_) / 3; y = y/ 1.0f;
-                 z+= cos((CameraRot.y() + 90.0f)/180.0f * PI_) / 3; z = z / 1.0f;
-
-                 if(voxels[get_value(x,y,z)]){
-
-                     astar_points.push_back(QVector3D(x_last, y_last, z_last));
-                     if(state == 0) DrawCube(QVector3D(x_last, -y_last, -z_last));
-                     break;
-                 }
-
-                 x_last = x; y_last = y; z_last = z;
-  }
-}
-
 void Processor::goalPositionSet(QVector3D position, QQuaternion rotation)
 {
    IMU_Get_Euler_Angle(Quat(odom.w, -odom.y, -odom.z, odom.x));
@@ -281,178 +273,150 @@ void Processor::goalPositionSet(QVector3D position, QQuaternion rotation)
    Finding_start_end_of_the_map_2d(position.x(), -position.z(), rotation.toEulerAngles().y());
 }
 
-
-void Processor::reset()
-{
-  astar_points.clear();
-
-  emit ClearLine();
-}
-
 void Processor::WindowState(uint8_t state)
 {
-   this->state = state;
+    this->state = state;
 }
 
-void Processor::VoxelsMapIn (const uint16_t * depth, float depth_scale)
+void Processor::timesync(uint64_t timebase, uint64_t time)
 {
-     if(ptr_guard_vertices_data){ ptr_guard_vertices_data = false; delete [] vertices_data;}
-     if(ptr_guard_color_data){ptr_guard_color_data = false;  delete [] color_data;}
+    last_lidar_sync_time = time;
+    last_scan_timebase = timebase;
+    frame_counter_at_last_timesync = hardware_frame_counter;
 
-
-//     double x = odom.x_pos * Map_scale; int16_t x_ = x - last_pos_x; /*вперёд */ if((x_ - last_x) != 0){last_pos_x = x; last_x = x_;}
-
-//     double y = odom.y_pos * Map_scale; int16_t y_ = y - last_pos_y;             if((y_ - last_y) != 0){last_pos_y = y; last_y = y_;}
-
-//     double z = odom.z_pos * Map_scale; int16_t z_ = z - last_pos_z; /*высота*/  if((z_ - last_z) != 0){last_pos_z = z; last_z = z_; }
-
-     int16_t delta_cells_x = 0;
-     int16_t delta_cells_y = 0;
-     int16_t delta_cells_z = 0;
-
-     double delta_x = expRunningAverage( odom.x_pos,  filter_integrate_x, filter_wegiht_x ) - last_pos_x;
-
-     accumulated_dx += delta_x;
-
-
-     if (fabs(accumulated_dx) >= 0.1) {
-         delta_cells_x = static_cast<int16_t>(floor(accumulated_dx * Map_scale));
-         accumulated_dx -= delta_cells_x / Map_scale;
-     }
-
-     last_pos_x = odom.x_pos;
-
-
-     double delta_y = expRunningAverage( odom.y_pos,  filter_integrate_y, filter_wegiht_y ) - last_pos_y;
-
-
-     accumulated_dy += delta_y;
-
-
-     if (fabs(accumulated_dy) >= 0.1) {
-         delta_cells_y = static_cast<int16_t>(floor(accumulated_dy * Map_scale));
-         accumulated_dy -= delta_cells_y / Map_scale;
-     }
-
-     last_pos_y = odom.y_pos;
-
-
-     double delta_z = expRunningAverage( odom.z_pos,  filter_integrate_z, filter_wegiht_z ) - last_pos_z;
-
-
-     accumulated_dz += delta_z;
-
-
-     if (fabs(accumulated_dz) >= 0.1) {
-         delta_cells_z = static_cast<int16_t>(floor(accumulated_dz * Map_scale));
-         accumulated_dz -= delta_cells_z / Map_scale;
-     }
-
-     last_pos_z = odom.z_pos;
-
-
-//    qDebug()<<" State_plus "<<x_<<" "<<y_<<" "<<z_;
-
-//    qDebug()<<" Last_pos "<<last_pos_x<<" "<<last_pos_y<<" "<<last_pos_z;
-
-//     deproject_depth_cuda(&serialization_point, &world_counter, voxels, intrinsics_depth, depth, depth_scale, odom.w, -odom.y, -odom.z, odom.x, x_, -y_, -z_);
-
-     deproject_depth_cuda(&serialization_point_1, serialization_point_2, &world_counter, voxels, costmap, intrinsics_depth, depth, depth_scale, odom.w, -odom.y, -odom.z, odom.x, delta_cells_x, -delta_cells_y, -delta_cells_z);
-
-     serialization_point_2 = serialization_point_1; serialization_point_1 = NULL;
-
-     //memset(voxels, 0, 16000000); //COLOUR c; uint16_t min = 29, max = 79;
-
-//   #pragma omp parallel for num_threads(10)
-
-//   for( uint32_t i = 0; i < world_counter; i++)
-//   {
-//     //if (max < serialization_point[i * 3 + 1]) max = serialization_point[i * 3 + 1]; if (min > serialization_point[i * 3 + 1]) min = serialization_point[i * 3 + 1];
-//   }
-
-     //qDebug()<<" World size "<<world_counter;
-
-     vertices_data = new GLfloat [world_counter]; ptr_guard_vertices_data = true;
-
-     color_data = new GLfloat [world_counter]; ptr_guard_color_data = true;
-
-
-     for(uint32_t i = 0; i < world_counter; i++)
-     {
-           uint16_t x = serialization_point_2[i * 3];
-           uint16_t y = serialization_point_2[i * 3 + 1];
-           uint16_t z = serialization_point_2[i * 3 + 2];
-
-           uint32_t buff = get_value(x, y, z);
-
-           //voxels[buff] = 1;
-
-           vertices_data[i] = UintBitsToFloat_memcpy(buff);
-
-            //если вдруг захочется покрасить кубик
-           //color_data_int[i] = pack_rgba_to_float(255,0,0,0);
-           color_data[i] = 0;
-
-           //vertices_data[i * 3] = x;
-           //vertices_data[i * 3 + 1] = -y;
-           //vertices_data[i * 3 + 2] = -z;
-
-           //c = GetColour(y, min, max);
-
-           //если вдруг захочется покрасить кубик
-
-//           color_data[i * 3] = 0.0f;
-//           color_data[i * 3 + 1] = 0.0f;
-//           color_data[i * 3 + 2] = 0.0f;
-
+    if(!has_lidar_time)
+    {
+    first_scan_lidar = time;
+    first_frame_camera = hardware_frame_counter + 1;
+    has_lidar_time = true;
+    cam_offset_ms = 0.0;
+    return;
     }
 
-    QImage img = colorizer->colorizeCostmap(costmap, 400, 400);
+    // Вычисляем сырое время камеры на момент прихода пакета
+    double raw_camera_time_ms = (hardware_frame_counter - first_frame_camera) * (1000.0 / 30.0);
 
-    if(state == 2) DisplayingCostMap(img, QQuaternion(odom.w, -odom.y, odom.z, -odom.x));
+    // Время лидара от первого пакета (мс)
+    double lidar_time_ms = (time - first_scan_lidar) / 1e6;
 
-    if(state == 0) emit DisplayingCubes(vertices_data, color_data, world_counter, QQuaternion(odom.w, -odom.y, odom.z, -odom.x));
-
-    state_lattice_->updateCostmapFromData(costmap);
-
-//   if(astar_points.size() > 1){
-
-   //x = 487 y = -515 z = -531   x= 505 y= -514 z = 544
-
-//    uint16_t point_1 [3] = {astar_points[0].x(),astar_points[0].y(),astar_points[0].z()};    uint16_t point_2 [3] = {astar_points[1].x(),astar_points[1].y(),astar_points[1].z()};
-
-   //astar->GetPathToTarget( point_1, point_2, voxels);
-
-   //emit manual_points(astar_points);
-
-//   astar_points.clear();
-//   }
-
-   // Аккумулируем общее смещение
-   total_offset_x += delta_cells_x;
-   total_offset_y += delta_cells_y;
-   total_offset_z += delta_cells_z;
-
-    // Создаем QVector3D
-    QVector3D current_offset(
-    static_cast<float>(total_offset_x),
-    static_cast<float>(total_offset_y),
-    static_cast<float>(total_offset_z)
-    );
-
-       // Проверяем изменение (сравниваем как целые для надежности)
-       if (total_offset_x != last_sent_offset_x ||
-           total_offset_y != last_sent_offset_y ||
-           total_offset_z != last_sent_offset_z) {
-
-           emit updateMapOffset(current_offset);
-
-           last_sent_offset_x = total_offset_x;
-           last_sent_offset_y = total_offset_y;
-           last_sent_offset_z = total_offset_z;
-       }
+    // Ошибка: положительное = камера опережает лидар
+    cam_offset_ms = (lidar_time_ms - raw_camera_time_ms);
 }
 
+void Processor::point_cloud_lidar(const uint16_t * keyframe_pcl, uint32_t size_keyframe,
+                                  const int16_t * lidar_pcl, uint32_t size_pcl)
+{
+        // === Забираем синхронизированный кадр камеры ===
+        rs2::frame depth;
+        float depth_scale;
+
+        {
+            std::unique_lock<std::mutex> lk(imu_mutex);
+
+            if (image_ready_ < 1) {
+                std::cout << "[SYNC] Дроп: лидар без кадра камеры" << std::endl;
+                return;
+            }
+            depth = pending_depth_frame_;
+            depth_scale = pending_depth_scale_;
+            image_ready_ = 0;
+
+            lk.unlock();
+        }
+
+        const uint16_t *depth_data = (const uint16_t*)depth.get_data();
+
+        // === Освобождаем старые буферы визуализации ===
+        if (ptr_guard_vertices_data) { delete[] vertices_data; ptr_guard_vertices_data = false; }
+        if (ptr_guard_color_data)    { delete[] color_data;    ptr_guard_color_data = false; }
+
+        // === Расчёт delta_cells ===
+        int16_t delta_cells_x = 0;
+        int16_t delta_cells_y = 0;
+        int16_t delta_cells_z = 0;
+
+        double delta_x = expRunningAverage(odom.x_pos, filter_integrate_x, filter_wegiht_x) - last_pos_x;
+        accumulated_dx += delta_x;
+        if (fabs(accumulated_dx) >= 0.1) {
+            delta_cells_x = static_cast<int16_t>(floor(accumulated_dx * Map_scale));
+            accumulated_dx -= delta_cells_x / Map_scale;
+        }
+        last_pos_x = odom.x_pos;
+
+        double delta_y = expRunningAverage(odom.y_pos, filter_integrate_y, filter_wegiht_y) - last_pos_y;
+        accumulated_dy += delta_y;
+        if (fabs(accumulated_dy) >= 0.1) {
+            delta_cells_y = static_cast<int16_t>(floor(accumulated_dy * Map_scale));
+            accumulated_dy -= delta_cells_y / Map_scale;
+        }
+        last_pos_y = odom.y_pos;
+
+        double delta_z = expRunningAverage(odom.z_pos, filter_integrate_z, filter_wegiht_z) - last_pos_z;
+        accumulated_dz += delta_z;
+        if (fabs(accumulated_dz) >= 0.1) {
+            delta_cells_z = static_cast<int16_t>(floor(accumulated_dz * Map_scale));
+            accumulated_dz -= delta_cells_z / Map_scale;
+        }
+        last_pos_z = odom.z_pos;
+
+        // === CUDA: депроекция + вокселизация (камера + лидар) + сдвиг ===
+        deproject_depth_cuda(&serialization_point, &world_counter,
+                             dev_voxels,
+                             intrinsics_depth, depth_data, depth_scale,
+                             odom.w, -odom.y, -odom.z, odom.x,
+                             delta_cells_x, -delta_cells_y, -delta_cells_z,
+                             keyframe_pcl, size_keyframe,
+                             lidar_pcl, size_pcl);
+
+        // === Costmap ===
+        int16_t current_y = 44;  // TODO: высота робота над землёй
+//        process_costmap_cuda(dev_voxels, dev_costmap, costmap, current_y);
+
+        // === Формирование массивов для визуализатора ===
+        vertices_data = new GLfloat[world_counter]; ptr_guard_vertices_data = true;
+        color_data    = new GLfloat[world_counter]; ptr_guard_color_data = true;
+
+        for (uint32_t i = 0; i < world_counter; i++) {
+            uint32_t idx = serialization_point[i];
+            vertices_data[i] = UintBitsToFloat_memcpy(idx);
+            color_data[i] = 0.0f;
+        }
+
+        // === Визуализация costmap ===
+        QImage img = colorizer->colorizeCostmap(costmap, 400, 400);
+        if (state == 2) DisplayingCostMap(img, QQuaternion(odom.w, -odom.y, odom.z, -odom.x));
+
+        // === Визуализация вокселей ===
+        if (state == 0) emit DisplayingCubes(vertices_data, color_data, world_counter,
+                                              QQuaternion(odom.w, -odom.y, odom.z, -odom.x));
+
+        // === Планировщик ===
+        state_lattice_->updateCostmapFromData(costmap);
+
+        // === Освобождение списка индексов ===
+        free(serialization_point);
+        serialization_point = nullptr;
+
+        // === Аккумулируем смещение ===
+        total_offset_x += delta_cells_x;
+        total_offset_y += delta_cells_y;
+        total_offset_z += delta_cells_z;
+
+        QVector3D current_offset(
+            static_cast<float>(total_offset_x),
+            static_cast<float>(total_offset_y),
+            static_cast<float>(total_offset_z)
+        );
+
+        if (total_offset_x != last_sent_offset_x ||
+            total_offset_y != last_sent_offset_y ||
+            total_offset_z != last_sent_offset_z) {
+            emit updateMapOffset(current_offset);
+            last_sent_offset_x = total_offset_x;
+            last_sent_offset_y = total_offset_y;
+            last_sent_offset_z = total_offset_z;
+        }
+}
 
 //void Processor::ArucoTrackerIn(std::vector<std::vector<cv::Point2f>> corners)
 //{
@@ -802,27 +766,33 @@ void Processor::run()
     else selected_device = devices[0];
 
     std::vector<rs2::sensor> sensors = selected_device.query_sensors();
-    int index = 0;
     // We can now iterate the sensors and print their names
-    for (rs2::sensor sensor : sensors)
-        if (sensor.supports(RS2_CAMERA_INFO_NAME)) {
-            ++index;
-            if (index == 1) {
-                sensor.set_option(RS2_OPTION_DEPTH_AUTO_EXPOSURE_MODE, RS2_DEPTH_AUTO_EXPOSURE_ACCELERATED);
-                sensor.set_option(RS2_OPTION_ENABLE_AUTO_EXPOSURE, 1.0f);
-                sensor.set_option(RS2_OPTION_EMITTER_ENABLED, 1.0f); // switch off emitter
-            }
-            // std::cout << "  " << index << " : " << sensor.get_info(RS2_CAMERA_INFO_NAME) << std::endl;
-            if (index == 2){
-                // RGB camera (not used here...)
-                //sensor.set_option(RS2_OPTION_EXPOSURE,100.f);
+    for (rs2::sensor sensor : sensors) {
+        // Проверяем, является ли текущий сенсор модулем глубины
+        if (auto depth_sensor = sensor.as<rs2::depth_sensor>()) {
+
+            // Отключаем или настраиваем экспозицию
+            depth_sensor.set_option(RS2_OPTION_DEPTH_AUTO_EXPOSURE_MODE, RS2_DEPTH_AUTO_EXPOSURE_ACCELERATED);
+            depth_sensor.set_option(RS2_OPTION_ENABLE_AUTO_EXPOSURE, 1.0f);
+            depth_sensor.set_option(RS2_OPTION_EMITTER_ENABLED, 1.0f);
+
+            // Включаем Output Trigger (Режим Master для внешних устройств)
+            if (depth_sensor.supports(RS2_OPTION_OUTPUT_TRIGGER_ENABLED)) {
+                depth_sensor.set_option(RS2_OPTION_OUTPUT_TRIGGER_ENABLED, 1.0f);
+                std::cout << "Output Trigger Enabled успешно включен!" << std::endl;
             }
 
-            if (index == 3){
-                sensor.set_option(RS2_OPTION_ENABLE_MOTION_CORRECTION,0);
+            // Включаем Inter Cam Sync Mode: 1 (Master)
+            if (depth_sensor.supports(RS2_OPTION_INTER_CAM_SYNC_MODE)) {
+                depth_sensor.set_option(RS2_OPTION_INTER_CAM_SYNC_MODE, 1.0f);
+                std::cout << "Inter Cam Sync Mode установлен в 1 (Master)" << std::endl;
             }
-
         }
+        if (auto motion_sensor = sensor.as<rs2::motion_sensor>()) {
+            motion_sensor.set_option(RS2_OPTION_ENABLE_MOTION_CORRECTION, 0);
+        }
+    }
+
 
   int width_img = 848, height_img = 480;
 
@@ -832,10 +802,10 @@ void Processor::run()
  // Create a configuration for configuring the pipeline with a non default profile
 
  // RGB stream
- config.enable_stream(RS2_STREAM_COLOR, width_img, height_img,  RS2_FORMAT_BGR8, 5);
+ config.enable_stream(RS2_STREAM_COLOR, width_img, height_img,  RS2_FORMAT_BGR8, 30);
 
  // Depth stream
- config.enable_stream(RS2_STREAM_DEPTH, width_img, height_img, RS2_FORMAT_Z16, 5);
+ config.enable_stream(RS2_STREAM_DEPTH, width_img, height_img, RS2_FORMAT_Z16, 30);
 
  //Stereo
  //config.enable_stream(RS2_STREAM_INFRARED, 1, 848, 480, RS2_FORMAT_Y8, 30);
@@ -846,77 +816,108 @@ void Processor::run()
  //config.enable_stream(RS2_STREAM_GYRO, RS2_FORMAT_MOTION_XYZ32F, 200);
 
  // IMU callback
- std::mutex imu_mutex;
- //std::condition_variable cond_image_rec;
-
- double v_gyro_timestamp = 0;
- rs2_vector v_gyro_data;
-
- double v_accel_timestamp = 0;
- rs2_vector v_accel_data;
- //double prev_accel_timestamp = 0;
- //rs2_vector prev_accel_data;
-
- uint8_t accel= 0, gyro = 0;
 
  bool reciv = false;
 
 
  double timestamp_image = -1.0;
- uint8_t image_ready = 0;
 
  // start and stop just to get necessary profile
  rs2::pipeline_profile pipe_profile = pipe.start(config);
  pipe.stop();
 
- rs2::frameset fsCam;
-
  auto imu_callback = [&](const rs2::frame& frame)
  {
-     std::unique_lock<std::mutex> lock(imu_mutex);
+
 
      if(rs2::frameset fs = frame.as<rs2::frameset>())
      {
-         fsCam = fs;
-
-         timestamp_image = fs.get_timestamp()*1e-3;
-         image_ready = 1;
-
-     }
-     if (rs2::motion_frame m_frame = frame.as<rs2::motion_frame>())
-     {
-         if (m_frame.get_profile().stream_name() == "Gyro")
+         rs2::frame depth_f = fs.get_depth_frame();
+         if (depth_f && depth_f.supports_frame_metadata(RS2_FRAME_METADATA_FRAME_COUNTER))
          {
-             gyro = 1;
-             // It runs at 200Hz
-             v_gyro_data = m_frame.get_motion_data();
-             v_gyro_timestamp = m_frame.get_timestamp()*1e-3;
-
-             //algo.process_gyro(v_gyro_data, v_gyro_timestamp);
+             hardware_frame_counter = depth_f.get_frame_metadata(RS2_FRAME_METADATA_FRAME_COUNTER);
          }
-         if (m_frame.get_profile().stream_name() == "Accel")
+
+         //Берем сырое текущее время камеры
+         double raw_camera_time_ms = ( hardware_frame_counter - first_frame_camera ) * (1000.0 / 30.0); // 33.333 мс на кадр
+
+         // Применяем смещение (обновляется в timesync)
+         double current_frame_time_ms = raw_camera_time_ms;
+         if (has_lidar_time)
          {
-             accel = 1;
-             // It runs at 200Hz
-
-             //prev_accel_timestamp = v_accel_timestamp;
-             //prev_accel_data = v_accel_data;
-
-             v_accel_data = m_frame.get_motion_data();
-             v_accel_timestamp = m_frame.get_timestamp()*1e-3;
-
-             //rs2_vector interp_data = interpolateMeasure(v_gyro_timestamp, v_accel_data, v_accel_timestamp, prev_accel_data, prev_accel_timestamp);
-
-             //v_accel_data = interp_data;
-             //v_accel_timestamp = v_gyro_timestamp;
-
-             //algo.process_accel(v_accel_data);
+             current_frame_time_ms += cam_offset_ms;
          }
+
+         // Переводим в наносекунды (абсолютное время, совместимое с last_lidar_sync_time)
+         double current_frame_time = first_scan_lidar + current_frame_time_ms * 1e6;
+
+         emit camsync (current_frame_time);
+
+         // 4. Сдвиг относительно скорректированного времени
+         uint64_t predicted_timebase = last_scan_timebase;
+         if (has_lidar_time) {
+             uint64_t frames_passed = hardware_frame_counter - frame_counter_at_last_timesync;
+             predicted_timebase = last_scan_timebase + (frames_passed / 3) * 100000000ULL;
+         }
+         double independent_phase_ms = (current_frame_time - predicted_timebase) / 1e6 - 100.0;
+
+         // Автоматическое определение целевого остатка
+         if (has_lidar_time && target_remainder == -1 && hardware_frame_counter >= 20) {
+             int rem = hardware_frame_counter % 3;
+             phase_shifts[rem] += independent_phase_ms;
+             phase_counts[rem]++;
+
+             if (phase_counts[0] > 0 && phase_counts[1] > 0 && phase_counts[2] > 0) {
+                 int best_rem = 0;
+                 double best_err = std::numeric_limits<double>::max();
+                 for (int i = 0; i < 3; i++) {
+                     double avg = phase_shifts[i] / phase_counts[i];
+                     double err = std::abs(avg - 50.0);  // цель — середина скана
+                     if (err < best_err) {
+                         best_err = err;
+                         best_rem = i;
+                     }
+                 }
+                 target_remainder = best_rem;
+                 std::cout << "[SYSTEM] Фаза захвачена! target_remainder = " << best_rem
+                           << ", фаза ≈ " << (phase_shifts[best_rem]/phase_counts[best_rem])
+                           << " мс" << std::endl;
+             }
+         }
+
+         // Логика фильтрации кадра по динамически определенному правилу
+         bool is_target_frame = false;
+         if (target_remainder != -1)
+         {
+             is_target_frame = ((hardware_frame_counter % 3) == target_remainder);
+
+             if (is_target_frame)
+             {
+                 std::unique_lock<std::mutex> lock(imu_mutex);
+                 pending_depth_frame_ = fs.get_depth_frame();
+                 pending_depth_scale_ = fs.get_depth_frame().get_units();
+                 image_ready_ = 1;
+                 timestamp_image = fs.get_timestamp()*1e-3;
+                 lock.unlock();
+
+                 std::unique_lock<std::mutex> lock_c(color_mutex);
+                 pending_color_frame_ = fs.get_color_frame();
+                 lock_c.unlock();
+             }
+         }
+
+         // В лог добавляем метку [TARGET], если это наш искомый кадр со сдвигом ~ 50 мс
+//         std::cout << "[CAM_THREAD] кадр № " << hardware_frame_counter
+//                          << (is_target_frame ? " [TARGET]" : "         ")
+//                          << " | Время CAM: " << ((current_frame_time - first_scan_lidar) / 1000000.0) << " мс"
+//                          << " | LIDAR_SYNC: " << ((last_lidar_sync_time - first_scan_lidar) / 1000000.0) << " мс"
+//                          << " | Фаза: " << independent_phase_ms << " мс"
+//                          << std::endl;
      }
+
 
      reciv = true;
-     lock.unlock();
-     //cond_image_rec.notify_all();
+
  };
 
    pipe_profile = pipe.start(config, imu_callback);
@@ -925,81 +926,10 @@ void Processor::run()
 
    intrinsics_depth = cam_stream.as<rs2::video_stream_profile>().get_intrinsics();
 
-   voxels = new uint8_t [16000000];
+   init_cuda_map(&dev_voxels, &dev_costmap);
 
-   costmap = new uint8_t [1600000];
+   costmap = new uint8_t [1600000];   // CPU-копия costmap (остаётся)
 
-//   rs2::stream_profile cam_left = pipe_profile.get_stream(RS2_STREAM_INFRARED, 1);
-//   rs2::stream_profile cam_right = pipe_profile.get_stream(RS2_STREAM_INFRARED, 2);
-
-//   rs2::stream_profile imu_stream = pipe_profile.get_stream(RS2_STREAM_GYRO);
-//   float* Rbc0 = cam_left.get_extrinsics_to(imu_stream).rotation;
-//   float* tbc0 = cam_left.get_extrinsics_to(imu_stream).translation;
-//   std::cout << "Tbc (left 1) = " << std::endl;
-//   for(int i = 0; i<3; i++){
-//       for(int j = 0; j<3; j++)
-//           std::cout << Rbc0[i*3 + j] << ", ";
-//       std::cout << tbc0[i] << "\n";
-//   }
-
-//   std::cout<<std::endl;
-
-//   float* Rbc1 = cam_right.get_extrinsics_to(imu_stream).rotation;
-//   float* tbc1 = cam_right.get_extrinsics_to(imu_stream).translation;
-//   std::cout << "Tbc (Right 2) = " << std::endl;
-//   for(int i = 0; i<3; i++){
-//       for(int j = 0; j<3; j++)
-//           std::cout << Rbc1[i*3 + j] << ", ";
-//       std::cout << tbc1[i] << "\n";
-//   }
-
-//   std::cout<<std::endl;
-
-//   float* Rlr = cam_right.get_extrinsics_to(cam_left).rotation;
-//   float* tlr = cam_right.get_extrinsics_to(cam_left).translation;
-//   std::cout << "T left-right  = " << std::endl;
-//   for(int i = 0; i<3; i++){
-//       for(int j = 0; j<3; j++)
-//           std::cout << Rlr[i*3 + j] << ", ";
-//       std::cout << tlr[i] << "\n";
-//   }
-
-//   std::cout<<std::endl;
-
-//   rs2_intrinsics intrinsics_left = cam_left.as<rs2::video_stream_profile>().get_intrinsics();
-//   width_img = intrinsics_left.width;
-//   height_img = intrinsics_left.height;
-//   std::cout << "Left camera 1: \n";
-//   std::cout << " fx = " << intrinsics_left.fx << std::endl;
-//   std::cout << " fy = " << intrinsics_left.fy << std::endl;
-//   std::cout << " cx = " << intrinsics_left.ppx << std::endl;
-//   std::cout << " cy = " << intrinsics_left.ppy << std::endl;
-//   std::cout << " height = " << intrinsics_left.height << std::endl;
-//   std::cout << " width = " << intrinsics_left.width << std::endl;
-//   std::cout << " Coeff = " << intrinsics_left.coeffs[0] << ", " << intrinsics_left.coeffs[1] << ", " <<
-//       intrinsics_left.coeffs[2] << ", " << intrinsics_left.coeffs[3] << ", " << intrinsics_left.coeffs[4] << ", " << std::endl;
-//   std::cout << " Model = " << intrinsics_left.model << std::endl;
-
-//   std::cout<<std::endl;
-
-//   rs2_intrinsics intrinsics_right = cam_right.as<rs2::video_stream_profile>().get_intrinsics();
-//   width_img = intrinsics_right.width;
-//   height_img = intrinsics_right.height;
-//   std::cout << "Right camera 2: \n";
-//   std::cout << " fx = " << intrinsics_right.fx << std::endl;
-//   std::cout << " fy = " << intrinsics_right.fy << std::endl;
-//   std::cout << " cx = " << intrinsics_right.ppx << std::endl;
-//   std::cout << " cy = " << intrinsics_right.ppy << std::endl;
-//   std::cout << " height = " << intrinsics_right.height << std::endl;
-//   std::cout << " width = " << intrinsics_right.width << std::endl;
-//   std::cout << " Coeff = " << intrinsics_right.coeffs[0] << ", " << intrinsics_right.coeffs[1] << ", " <<
-//       intrinsics_right.coeffs[2] << ", " << intrinsics_right.coeffs[3] << ", " << intrinsics_right.coeffs[4] << ", " << std::endl;
-//   std::cout << " Model = " << intrinsics_right.model << std::endl;
-
-//   std::cout<<std::endl;
-
-// double timestamp;
-// cv::Mat im, imRight;
 
    cv::Mat Color;
 
@@ -1007,75 +937,22 @@ void Processor::run()
  {
    if(reciv) {
 
-//     rs2_vector vGyro;
-//     double vGyro_times;
-//     rs2_vector vAccel;
-//     double vAccel_times;
-     rs2::frame depth;
-     float depth_scale;
 
-     rs2::frameset fs;
-     {
-         std::unique_lock<std::mutex> lk(imu_mutex);
+   {
+   std::unique_lock<std::mutex> lk(color_mutex);
+   if (image_ready_ == 1) {
 
-         //cond_image_rec.wait(lk);
+   image_ready_ = 2;   // помечаем, что aruco забрал Color
+   Color = cv::Mat(cv::Size(width_img, height_img), CV_8UC3,
+                           (void*)pending_color_frame_.get_data(), cv::Mat::AUTO_STEP);
+   }
+     lk.unlock();
+   }
 
-         if(image_ready == 1){
+   if(image_ready_ == 2) {
 
-         fs = fsCam;
+    std::vector<int> ids; bool marker_detected = false;
 
-//         rs2::video_frame ir_frameL = fs.get_infrared_frame(1);
-//         rs2::video_frame ir_frameR = fs.get_infrared_frame(2);
-
-           rs2::video_frame color_frame = fs.get_color_frame();
-
-           Color = cv::Mat(cv::Size(width_img, height_img), CV_8UC3, (void*)(color_frame.get_data()), cv::Mat::AUTO_STEP);
-
-//         im= cv::Mat(cv::Size(width_img, height_img), CV_8UC1, (void*)(ir_frameL.get_data()), cv::Mat::AUTO_STEP);
-//         imRight = cv::Mat(cv::Size(width_img, height_img), CV_8UC1, (void*)(ir_frameR.get_data()), cv::Mat::AUTO_STEP);
-
-         // Image
-//         timestamp = timestamp_image;
-
-         depth = fs.get_depth_frame();
-
-         depth_scale = fs.get_depth_frame().get_units();
-
-         image_ready = 2;
-
-         }
-//         if(gyro == 1 && accel == 1){
-
-         // Copy the IMU data
-//         vGyro = v_gyro_data;
-//         vGyro_times = v_gyro_timestamp;
-//         vAccel = v_accel_data;
-//         vAccel_times = v_accel_timestamp;
-
-//         gyro = 2; accel = 2;
-//         }
-
-         lk.unlock();
-     }
-
-//     if(gyro == 2 && accel == 2){
-
-//      emit grab_imu (vGyro, vGyro_times, vAccel, vAccel_times);
-
-//      emit input_track(vAccel_times);
-
-//      gyro = 0; accel = 0;
-//     }
-
-     if(image_ready == 2) {
-
-      //emit grab_stereo_camera(im, imRight, timestamp, width_img, height_img);
-
-      auto depth_data = (uint16_t*)depth.get_data();
-
-      if(first_start) emit VoxelsMapOut (depth_data, depth_scale);
-
-      std::vector<int> ids; bool marker_detected = false;
       std::vector<std::vector<cv::Point2f>> corners, rejectedCandidates;
 
       cv::aruco::ArucoDetector detector(dictionary, detectorParams);
@@ -1104,27 +981,16 @@ void Processor::run()
 
        if(state == 2) emit Invisible_Aruco(true);
      }
-
-      // if(counter <= 1){ VoxelsMaps(intrinsics_depth.height * intrinsics_depth.width); /*pipe.stop(); */counter = 15; }
-      // counter--;
-
-      image_ready = 0;
-
      }
 
      reciv = false;
+   }
+   else usleep(50);
 
-     }
-     else usleep(50);
  }
 
  pipe.stop();
 }
-
-//void Processor::output_track(OpenVins_Data data)
-//{
-//    vio_data = data;
-//}
 
 void Processor::odometry_lidar(odometry data)
 {
