@@ -214,7 +214,7 @@ void OGLWidget::wheelEvent(QWheelEvent *event)
 void OGLWidget::keyPressEvent(QKeyEvent *event)
 {
      //qDebug()<< event->key();
-     if ((event->key() == 1062) || (event->key() == 87)) m_camera->Front_move();
+     if (event->key() == Qt::Key_W) m_camera->Front_move();
      if (event->key() == Qt::Key_S) m_camera->Back_move();
      if (event->key() == Qt::Key_A) m_camera->right_move();
      if (event->key() == Qt::Key_D) m_camera->left_move();

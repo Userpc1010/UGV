@@ -67,7 +67,7 @@ uint32_t world_counter;
 
  uint8_t  *dev_voxels;        // GPU-указатель на воксельную карту (16 МБ)
  uint8_t  *dev_costmap;       // GPU-указатель на 2D costmap (1.6 МБ)
- uint32_t *serialization_point;  // CPU-копия списка индексов для визуализации
+ float *serialization_point;  // CPU-копия списка индексов для визуализации
  uint8_t  *costmap;           // CPU-копия costmap (остаётся)
 
 private:
@@ -144,6 +144,8 @@ private:
 
  double cam_offset_ms = 0.0;
 
+ uint8_t time_stabilized = 15;
+
  uint64_t last_lidar_sync_time = 0;
 
  uint64_t first_scan_lidar = 0;
@@ -178,11 +180,14 @@ private:
 
   // === Буфер синхронизированного кадра камеры (RGB-D) ===
   std::mutex imu_mutex;
-  std::mutex color_mutex;
-  rs2::frame pending_depth_frame_;
+  std::mutex depth_mutex;
   rs2::frame pending_color_frame_;
+  rs2::frame pending_depth_frame_;
+  rs2::frame pending_depth_frame_2;
   float pending_depth_scale_ = 0.0f;
+  float pending_depth_scale_2 = 0.0f;
   std::atomic<uint8_t> image_ready_{0};   // 0 = нет, 1 = готов (записан в pending_*), 2 = забран для aruco
+  bool depth_ready = false;
 
 private:
 

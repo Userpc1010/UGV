@@ -107,11 +107,6 @@ void LivoxSDK::PointCloudCallback(uint32_t handle, const uint8_t dev_type, Livox
        return;
      }
 
-    if (!time_stabilized) {
-      // Ждём скачка, ничего не накапливаем
-      return;
-    }
-
      if(lock_){lock_ = false; customMsg.points.clear(); customMsg.point_num = 0;}
 
     // printf("point cloud handle: %u, data_num: %d, data_type: %d, length: %d, frame_counter: %d\n",handle, data->dot_num, data->data_type, data->length, data->frame_cnt);
@@ -164,7 +159,7 @@ void LivoxSDK::PointCloudCallback(uint32_t handle, const uint8_t dev_type, Livox
          customMsg.header.msg_seq++;
          customMsg.timebase = scan_start_time;
 
-         emit mapping->callbackPointCloud2(customMsg);
+         if (time_stabilized) emit mapping->callbackPointCloud2(customMsg);
 
          last += 100000000;
        }
@@ -184,11 +179,6 @@ void LivoxSDK::ImuDataCallback(uint32_t handle, const uint8_t dev_type, LivoxLid
     if (data->data_type == kLivoxLidarImuData) {
 
         uint64_t timestamp = GetEthPacketTimestamp(handle, data->time_type, data->timestamp, sizeof(data->timestamp));
-
-        if (!time_stabilized) {
-               // Ждём скачка, ничего не накапливаем
-               return;
-        }
 
         if(((timestamp - Last_upd) / 1000.0) < 2000 ) { Last_upd += 5000000; timestamp += 2000 - ((timestamp - Last_upd) / 1000.0); }
         else Last_upd += 5000000;
@@ -213,7 +203,7 @@ void LivoxSDK::ImuDataCallback(uint32_t handle, const uint8_t dev_type, LivoxLid
         imu.linear_acceleration[1] = p_point_data->acc_y;
         imu.linear_acceleration[2] = p_point_data->acc_z;
 
-        emit mapping->callbackImu2(imu);
+        if (time_stabilized) emit mapping->callbackImu2(imu);
 
         //printf("Imu data callback acc_x:%f, acc_y:%f, acc_z:%f, time:%u, dot_num:%u.\n", handle, p_point_data->acc_x, p_point_data->acc_y, p_point_data->acc_z, timestamp, data->dot_num);
     }
@@ -224,14 +214,9 @@ uint64_t LivoxSDK::GetEthPacketTimestamp(uint32_t handle, uint8_t timestamp_type
     LdsStamp time;
     memcpy(time.stamp_bytes, time_stamp, size);
 
-    if (time_stabilized)
-    {
-        // Дельта = время камеры - текущее время лидара
-        double delta_ns = cam_offset - time.stamp;
+    // Дельта = время камеры - текущее время лидара
+    double delta_ns = cam_offset - (double)time.stamp;
 
-        // Корректируем время лидара на эту дельту + фазовый сдвиг
-        return time.stamp + (int64_t)delta_ns - (int64_t)TARGET_PHASE_NS;
-    }
-
-    return time.stamp;
+    // Корректируем время лидара на эту дельту + фазовый сдвиг
+    return time.stamp + (int64_t)delta_ns - (int64_t)TARGET_PHASE_NS;
 }

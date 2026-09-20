@@ -12,7 +12,7 @@ extern "C"
 void cleanup_cuda_map(uint8_t *dev_voxels, uint8_t *dev_costmap);
 
 extern "C"
-void deproject_depth_cuda(uint32_t **serialization_point_1, uint32_t *world_counter, uint8_t *dev_voxels,
+void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter, uint8_t *dev_voxels,
                           const rs2_intrinsics &intrin, const uint16_t *depth, float depth_scale,
                           double w, double x, double y, double z,
                           int16_t x_, int16_t y_, int16_t z_,
@@ -280,6 +280,8 @@ void Processor::WindowState(uint8_t state)
 
 void Processor::timesync(uint64_t timebase, uint64_t time)
 {
+    if(time_stabilized >= 1 )time_stabilized --;
+    else{
     last_lidar_sync_time = time;
     last_scan_timebase = timebase;
     frame_counter_at_last_timesync = hardware_frame_counter;
@@ -301,6 +303,7 @@ void Processor::timesync(uint64_t timebase, uint64_t time)
 
     // Ошибка: положительное = камера опережает лидар
     cam_offset_ms = (lidar_time_ms - raw_camera_time_ms);
+    }
 }
 
 void Processor::point_cloud_lidar(const uint16_t * keyframe_pcl, uint32_t size_keyframe,
@@ -311,15 +314,15 @@ void Processor::point_cloud_lidar(const uint16_t * keyframe_pcl, uint32_t size_k
         float depth_scale;
 
         {
-            std::unique_lock<std::mutex> lk(imu_mutex);
+            std::unique_lock<std::mutex> lk(depth_mutex);
 
-            if (image_ready_ < 1) {
+            if (!depth_ready) {
                 std::cout << "[SYNC] Дроп: лидар без кадра камеры" << std::endl;
                 return;
             }
-            depth = pending_depth_frame_;
-            depth_scale = pending_depth_scale_;
-            image_ready_ = 0;
+            depth = pending_depth_frame_2;
+            depth_scale = pending_depth_scale_2;
+            depth_ready = false;
 
             lk.unlock();
         }
@@ -376,11 +379,8 @@ void Processor::point_cloud_lidar(const uint16_t * keyframe_pcl, uint32_t size_k
         vertices_data = new GLfloat[world_counter]; ptr_guard_vertices_data = true;
         color_data    = new GLfloat[world_counter]; ptr_guard_color_data = true;
 
-        for (uint32_t i = 0; i < world_counter; i++) {
-            uint32_t idx = serialization_point[i];
-            vertices_data[i] = UintBitsToFloat_memcpy(idx);
-            color_data[i] = 0.0f;
-        }
+        memcpy(vertices_data, serialization_point, world_counter * sizeof(GLfloat));
+        memset(color_data, 0, world_counter * sizeof(GLfloat));
 
         // === Визуализация costmap ===
         QImage img = colorizer->colorizeCostmap(costmap, 400, 400);
@@ -817,9 +817,6 @@ void Processor::run()
 
  // IMU callback
 
- bool reciv = false;
-
-
  double timestamp_image = -1.0;
 
  // start and stop just to get necessary profile
@@ -828,7 +825,7 @@ void Processor::run()
 
  auto imu_callback = [&](const rs2::frame& frame)
  {
-
+   std::unique_lock<std::mutex> lock(imu_mutex);
 
      if(rs2::frameset fs = frame.as<rs2::frameset>())
      {
@@ -862,7 +859,7 @@ void Processor::run()
          double independent_phase_ms = (current_frame_time - predicted_timebase) / 1e6 - 100.0;
 
          // Автоматическое определение целевого остатка
-         if (has_lidar_time && target_remainder == -1 && hardware_frame_counter >= 20) {
+         if (has_lidar_time && target_remainder == -1 && hardware_frame_counter >= 64) {
              int rem = hardware_frame_counter % 3;
              phase_shifts[rem] += independent_phase_ms;
              phase_counts[rem]++;
@@ -893,21 +890,19 @@ void Processor::run()
 
              if (is_target_frame)
              {
-                 std::unique_lock<std::mutex> lock(imu_mutex);
+
                  pending_depth_frame_ = fs.get_depth_frame();
                  pending_depth_scale_ = fs.get_depth_frame().get_units();
+                 pending_color_frame_ = fs.get_color_frame();
                  image_ready_ = 1;
                  timestamp_image = fs.get_timestamp()*1e-3;
-                 lock.unlock();
 
-                 std::unique_lock<std::mutex> lock_c(color_mutex);
-                 pending_color_frame_ = fs.get_color_frame();
-                 lock_c.unlock();
+
              }
          }
 
-         // В лог добавляем метку [TARGET], если это наш искомый кадр со сдвигом ~ 50 мс
-//         std::cout << "[CAM_THREAD] кадр № " << hardware_frame_counter
+        //  В лог добавляем метку [TARGET], если это наш искомый кадр со сдвигом ~ 50 мс
+//        std::cout << "[CAM_THREAD] кадр № " << hardware_frame_counter
 //                          << (is_target_frame ? " [TARGET]" : "         ")
 //                          << " | Время CAM: " << ((current_frame_time - first_scan_lidar) / 1000000.0) << " мс"
 //                          << " | LIDAR_SYNC: " << ((last_lidar_sync_time - first_scan_lidar) / 1000000.0) << " мс"
@@ -915,9 +910,7 @@ void Processor::run()
 //                          << std::endl;
      }
 
-
-     reciv = true;
-
+   lock.unlock();
  };
 
    pipe_profile = pipe.start(config, imu_callback);
@@ -930,24 +923,35 @@ void Processor::run()
 
    costmap = new uint8_t [1600000];   // CPU-копия costmap (остаётся)
 
-
    cv::Mat Color;
+
+   rs2::frame pending_depth_frame;
+   float pending_depth_scale = 0.0f;
 
  while(process_rgbd)
  {
-   if(reciv) {
+   if(image_ready_) {
 
 
-   {
-   std::unique_lock<std::mutex> lk(color_mutex);
    if (image_ready_ == 1) {
+    std::unique_lock<std::mutex> lk(imu_mutex);
 
-   image_ready_ = 2;   // помечаем, что aruco забрал Color
-   Color = cv::Mat(cv::Size(width_img, height_img), CV_8UC3,
-                           (void*)pending_color_frame_.get_data(), cv::Mat::AUTO_STEP);
+    image_ready_ = 2;   // помечаем, что aruco забрал Color
+    Color = cv::Mat(cv::Size(width_img, height_img), CV_8UC3, (void*)pending_color_frame_.get_data(), cv::Mat::AUTO_STEP);
+    pending_depth_frame = pending_depth_frame_;
+    pending_depth_scale = pending_depth_scale_;
+
+    lk.unlock();
    }
-     lk.unlock();
-   }
+
+    if (image_ready_ == 2) {
+    std::unique_lock<std::mutex> lk(depth_mutex);
+    pending_depth_frame_2 = pending_depth_frame;
+    pending_depth_scale_2 = pending_depth_scale;
+    depth_ready = true;
+    lk.unlock();
+    }
+
 
    if(image_ready_ == 2) {
 
@@ -983,7 +987,9 @@ void Processor::run()
      }
      }
 
-     reciv = false;
+
+     image_ready_ = 0;
+
    }
    else usleep(50);
 

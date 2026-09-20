@@ -526,23 +526,24 @@ __global__ void count_map_size_2(uint8_t *voxels, uint32_t* d_result, uint32_t s
     }
 }
 
-// Сериализация: один поток — один элемент. Читает data[idx] == 1, пишет индекс в indices[pos].
-// Не обнуляет data!
-__global__ void serialization_cuda_2(const uint8_t *data, uint32_t* indices, uint32_t* count, uint32_t size)
+// Сериализация: один поток — один элемент. Читает data[idx] == 1, пишет индекс в indices[pos]
+// как float (битовая переинтерпретация uint32_t -> float). Не обнуляет data!
+__global__ void serialization_cuda_2(const uint8_t *data, float* indices, uint32_t* count, uint32_t size)
 {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
 
     if (data[idx] == 1) {
         uint32_t pos = atomicAdd(count, 1);
-        indices[pos] = idx;
+        indices[pos] = __uint_as_float(idx);
     }
 }
 
-// Сдвиг списка индексов (uint32_t). Распаковывает (x,y,z), сдвигает, запаковывает обратно.
 __global__
-void offset_cuda_2(uint32_t *output, uint32_t *dev_world_counter, int16_t x_, int16_t y_, int16_t z_)
+void offset_cuda_2(float *output, uint32_t *dev_world_counter, int16_t x_, int16_t y_, int16_t z_)
 {
+    uint32_t *output_u32 = reinterpret_cast<uint32_t*>(output);
+
     uint32_t i = blockDim.x * blockIdx.x + threadIdx.x;
     uint32_t stride = blockDim.x * gridDim.x;
 
@@ -550,7 +551,7 @@ void offset_cuda_2(uint32_t *output, uint32_t *dev_world_counter, int16_t x_, in
 
     for (uint32_t j = i; j < total_points; j += stride)
     {
-        uint32_t *point = &output[j];
+        uint32_t *point = &output_u32[j];
 
         int16_t orig_z = point[0] / (Map_X * Map_Y);
         uint32_t remaining = point[0] % (Map_X * Map_Y);
@@ -571,16 +572,18 @@ void offset_cuda_2(uint32_t *output, uint32_t *dev_world_counter, int16_t x_, in
 }
 
 // Восстановление dev_voxels из сдвинутого списка индексов.
-// Логика: для каждого индекса indices[j] установить voxels[indices[j]] = 1.
+// indices теперь float* — битовая интерпретация uint32_t (через reinterpret_cast).
 __global__
-void deserialization_cuda_2(const uint32_t *indices, uint8_t *voxels, uint32_t count)
+void deserialization_cuda_2(const float *indices, uint8_t *voxels, uint32_t count)
 {
+    const uint32_t *indices_u32 = reinterpret_cast<const uint32_t*>(indices);
+
     uint32_t i = blockDim.x * blockIdx.x + threadIdx.x;
     uint32_t stride = blockDim.x * gridDim.x;
 
     for (uint32_t j = i; j < count; j += stride)
     {
-        voxels[indices[j]] = 1;
+        voxels[indices_u32[j]] = 1;
     }
 }
 
@@ -872,7 +875,7 @@ void cleanup_cuda_map(uint8_t *dev_voxels, uint8_t *dev_costmap)
 
 extern "C"
 __host__
-void deproject_depth_cuda(uint32_t **serialization_point_1, uint32_t *world_counter,
+void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter,
                           uint8_t *dev_voxels,
                           const rs2_intrinsics &intrin, const uint16_t *depth, float depth_scale,
                           double w, double x, double y, double z,
@@ -897,7 +900,7 @@ void deproject_depth_cuda(uint32_t **serialization_point_1, uint32_t *world_coun
     rs2_intrinsics *dev_intrin;
     uint16_t *dev_ray_points;
     uint32_t *dev_local_counter;
-    uint32_t *dev_serializ_point;
+    float *dev_serializ_point;
 
     result = cudaMalloc(&dev_ray_points, count * sizeof(uint16_t) * 3);
     std::cout << "Stage 1 (malloc ray_points)" << std::endl;
@@ -921,7 +924,7 @@ void deproject_depth_cuda(uint32_t **serialization_point_1, uint32_t *world_coun
     std::cout << "Stage 5 (memset local_counter)" << std::endl;
     assert(result == cudaSuccess);
 
-    result = cudaMalloc(&dev_serializ_point, Map_length * sizeof(uint32_t));
+    result = cudaMalloc(&dev_serializ_point, Map_length * sizeof(float));
     std::cout << "Stage 6 (malloc serializ_point)" << std::endl;
     assert(result == cudaSuccess);
 
@@ -986,58 +989,46 @@ void deproject_depth_cuda(uint32_t **serialization_point_1, uint32_t *world_coun
     // ========================================================================
     // ОБРАБОТКА ЛИДАРА
     // ========================================================================
-    if (keyframe_size > 0) {
-        int16_t *dev_keyframe_pcl;
-        result = cudaMalloc(&dev_keyframe_pcl, keyframe_size * 3 * sizeof(int16_t));
-        std::cout << "Stage 13.1 (malloc keyframe_pcl, size=" << keyframe_size << ")" << std::endl;
+
+    if (lidar_size > 0) {
+        int16_t *dev_lidar_pcl;
+        result = cudaMalloc(&dev_lidar_pcl, lidar_size * 3 * sizeof(int16_t));
+        std::cout << "Stage 13.1 (malloc lidar_pcl, size=" << lidar_size << ")" << std::endl;
         assert(result == cudaSuccess);
 
-        result = cudaMemcpy(dev_keyframe_pcl, keyframe_pcl,
-                            keyframe_size * 3 * sizeof(int16_t), cudaMemcpyHostToDevice);
-        std::cout << "Stage 13.2 (memcpy keyframe_pcl)" << std::endl;
+        result = cudaMemcpy(dev_lidar_pcl, lidar_pcl,
+                            lidar_size * 3 * sizeof(int16_t), cudaMemcpyHostToDevice);
+        std::cout << "Stage 13.2 (memcpy lidar_pcl)" << std::endl;
         assert(result == cudaSuccess);
 
-        // 1. Ray casting — зачищаем вдоль лучей от центра к точкам
-        ray_casting_map_lidar<<<128, 128>>>(dev_voxels, dev_keyframe_pcl, keyframe_size);
+        // Ray casting — зачищаем free space по актуальному скану
+        ray_casting_map_lidar<<<128, 128>>>(dev_voxels, dev_lidar_pcl, lidar_size);
         result = cudaDeviceSynchronize();
         std::cout << "Stage 13.3 (ray_casting_map_lidar)" << std::endl;
         assert(result == cudaSuccess);
 
+        cudaFree(dev_lidar_pcl);
+    }
 
+    if (keyframe_size > 0) {
+        int16_t *dev_keyframe_pcl;
+        result = cudaMalloc(&dev_keyframe_pcl, keyframe_size * 3 * sizeof(int16_t));
+        std::cout << "Stage 13.4 (malloc keyframe_pcl, size=" << keyframe_size << ")" << std::endl;
+        assert(result == cudaSuccess);
+
+        result = cudaMemcpy(dev_keyframe_pcl, keyframe_pcl,
+                            keyframe_size * 3 * sizeof(int16_t), cudaMemcpyHostToDevice);
+        std::cout << "Stage 13.5 (memcpy keyframe_pcl)" << std::endl;
+        assert(result == cudaSuccess);
+
+        // voxelization — ставим occupied по накопленному keyframe
         voxelization_cuda_lidar<<<128, 128>>>(dev_voxels, dev_keyframe_pcl, keyframe_size);
-
         result = cudaDeviceSynchronize();
-        std::cout << "Stage 13.4 (voxelization_cuda keyframe)" << std::endl;
+        std::cout << "Stage 13.6 (voxelization_cuda_lidar keyframe)" << std::endl;
         assert(result == cudaSuccess);
 
         cudaFree(dev_keyframe_pcl);
     }
-
-//    if (lidar_size > 0) {
-//        int16_t *dev_lidar_pcl;
-//        result = cudaMalloc(&dev_lidar_pcl, lidar_size * 3 * sizeof(int16_t));
-//        std::cout << "Stage 13.5 (malloc lidar_pcl, size=" << lidar_size << ")" << std::endl;
-//        assert(result == cudaSuccess);
-
-//        result = cudaMemcpy(dev_lidar_pcl, lidar_pcl,
-//                            lidar_size * 3 * sizeof(int16_t), cudaMemcpyHostToDevice);
-//        std::cout << "Stage 13.6 (memcpy lidar_pcl)" << std::endl;
-//        assert(result == cudaSuccess);
-
-//        // 1. Ray casting — зачищаем вдоль лучей от центра к точкам
-//        ray_casting_map_lidar<<<128, 128>>>(dev_voxels, dev_lidar_pcl, lidar_size);
-//        result = cudaDeviceSynchronize();
-//        std::cout << "Stage 13.7 (ray_casting_map_lidar)" << std::endl;
-//        assert(result == cudaSuccess);
-
-//        // 2. Вокселизация — добавляем точки лидара в карту
-//        voxelization_cuda_lidar<<<128, 128>>>(dev_voxels, dev_lidar_pcl, lidar_size);
-//        result = cudaDeviceSynchronize();
-//        std::cout << "Stage 13.8 (voxelization_cuda_lidar)" << std::endl;
-//        assert(result == cudaSuccess);
-
-//        cudaFree(dev_lidar_pcl);
-//    }
 
     // ========================================================================
     // ПОДСЧЁТ ЗАНЯТЫХ ВОКСЕЛЕЙ
@@ -1101,8 +1092,8 @@ void deproject_depth_cuda(uint32_t **serialization_point_1, uint32_t *world_coun
     // ========================================================================
     // КОПИЯ СПИСКА НА CPU
     // ========================================================================
-    uint32_t *buff = (uint32_t*)malloc(total_sum * sizeof(uint32_t));
-    result = cudaMemcpy(buff, dev_serializ_point, total_sum * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    float *buff = (float*)malloc(total_sum * sizeof(float));
+    result = cudaMemcpy(buff, dev_serializ_point, total_sum * sizeof(float), cudaMemcpyDeviceToHost);
     std::cout << "Stage 22 (memcpy serializ_point to CPU)" << std::endl;
     assert(result == cudaSuccess);
 
@@ -1153,11 +1144,6 @@ void process_costmap_cuda(uint8_t *dev_voxels, uint8_t *dev_costmap,
     assert(result == cudaSuccess && "Failed to begin stream capture");
 
     // =========================================================================
-    // TODO: сюда вставить развёрнутый цикл из старого deproject_depth_cuda
-    // 100 пар ядер:
-    //   findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[i], current_y);
-    //   processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[i], current_y, 5);
-    //
     // ВАЖНО: захват в цикле for не работает корректно. Нужно развернуть вручную.
     // =========================================================================
 

@@ -55,7 +55,7 @@ MainWindow::MainWindow(QWidget *parent) :
   qRegisterMetaType< uint16_t >("uint16_t");
   qRegisterMetaType< uint32_t >("uint32_t");
   qRegisterMetaType< uint64_t >("uint64_t");
-  qRegisterMetaType< uint64_t >("int64_t");
+  qRegisterMetaType< int64_t >("int64_t");
   qRegisterMetaType< GUI_telem >("GUI_telem");
   qRegisterMetaType< uint8_t >("uint8_t");
   qRegisterMetaType< GLfloat >("GLfloat");
