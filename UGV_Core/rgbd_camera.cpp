@@ -373,7 +373,7 @@ void Processor::point_cloud_lidar(const uint16_t * keyframe_pcl, uint32_t size_k
 
         // === Costmap ===
         int16_t current_y = 44;  // TODO: высота робота над землёй
-//        process_costmap_cuda(dev_voxels, dev_costmap, costmap, current_y);
+        process_costmap_cuda(dev_voxels, dev_costmap, costmap, current_y);
 
         // === Формирование массивов для визуализатора ===
         vertices_data = new GLfloat[world_counter]; ptr_guard_vertices_data = true;

@@ -16,6 +16,8 @@
 #define Map_center_Y 49
 #define Map_center_Z 199
 #define Map_scale 10.0f
+#define DEFAULT_ROBOT_Y 44
+#define ROBOT_HEIGHT 5
 
 __device__ float Rotation_matrix[9] = {0.999048f, 0.018916f, -0.0393044f, 0.0f, 0.901077f, -0.433659f, 0.0436194f, 0.433246f, 0.900219f};
 __device__ float Translation[3] = {-0.065f, 0.089f, 0.055f};
@@ -588,215 +590,315 @@ void deserialization_cuda_2(const float *indices, uint8_t *voxels, uint32_t coun
 }
 
 
-// Вспомогательная функция для вычисления значения разницы высот
-__device__ uint8_t calculate_height_value(int16_t layer_y, int16_t current_y) {
-    return static_cast<uint8_t>(abs(layer_y - current_y));
+// ============================================================================
+// Поиск высоты робота: снизу вверх по столбику в центре карты
+// ============================================================================
+__global__ void find_robot_height_kernel(
+    const uint8_t* __restrict__ dev_voxels,
+    int* __restrict__ dev_robot_y,
+    int default_y)
+{
+    // Один поток — этого достаточно, работаем с одним столбиком
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+    const int cx = Map_center_X;
+    const int cz = Map_center_Z;
+
+    int found_y = -1;
+
+    // Идём снизу вверх: y = 0..Map_Y-1
+    for (int y = 0; y < Map_Y; y++) {
+        if (dev_voxels[get_value(cx, y, cz)] != 0) {
+            found_y = y;
+            break;
+        }
+    }
+
+    *dev_robot_y = (found_y < 0) ? default_y : found_y;
 }
 
-// Ядро для поиска контуров в указанном слое Y
-__global__ void findContoursKernel(uint8_t* data, int16_t layer_y, int16_t current_y) {
-    // Вычисляем координаты x и z для текущего потока
+
+// ============================================================================
+// Slope: Least Squares + локальный + глобальный + размах (из TerrainModel)
+// ============================================================================
+__device__ void getSlopeOfPoints( const float* heights, const float* xs, const float* zs, int n, float& slopeX, float& slopeZ)
+{
+    if (n < 3) { slopeX = 0.0f; slopeZ = 0.0f; return; }
+
+    float sumX = 0, sumZ = 0, sumH = 0;
+    float sumX2 = 0, sumZ2 = 0, sumXZ = 0;
+    float sumXH = 0, sumZH = 0;
+
+    for (int i = 0; i < n; ++i) {
+        float x = xs[i], z = zs[i], h = heights[i];
+        sumX += x; sumZ += z; sumH += h;
+        sumX2 += x * x; sumZ2 += z * z; sumXZ += x * z;
+        sumXH += x * h; sumZH += z * h;
+    }
+
+    float det = sumX2 * (sumZ2 * n - sumZ * sumZ)
+              - sumXZ * (sumXZ * n - sumZ * sumX)
+              + sumX  * (sumXZ * sumZ - sumZ2 * sumX);
+
+    if (fabsf(det) < 1e-10f) { slopeX = 0.0f; slopeZ = 0.0f; return; }
+
+    float detA = sumXH * (sumZ2 * n - sumZ * sumZ)
+               - sumXZ * (sumZH * n - sumZ * sumH)
+               + sumX  * (sumZH * sumZ - sumZ2 * sumH);
+
+    float detB = sumX2 * (sumZH * n - sumZ * sumH)
+               - sumXH * (sumXZ * n - sumZ * sumX)
+               + sumX  * (sumXZ * sumH - sumZH * sumX);
+
+    slopeX = detA / det;
+    slopeZ = detB / det;
+}
+
+__global__ void heightmap_to_slope_cuda( const float* __restrict__ dev_heightmap, float* __restrict__ dev_slope, int estimation_size)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int z = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= Map_X || z >= Map_Z) return;
+
+    const float cellSize = 1.0f;  // 1 воксель = 0.1 м, но мы работаем в вокселях
+
+    // --- Локальный slope (окно 3×3) ---
+    float hl[9], xl[9], zl[9];
+    int nl = 0;
+    float raw_min = 1e30f, raw_max = -1e30f;
+
+    for (int dr = -1; dr <= 1; ++dr) {
+        for (int dc = -1; dc <= 1; ++dc) {
+            int nr = z + dr;
+            int nc = x + dc;
+            if (nr < 0 || nr >= Map_Z || nc < 0 || nc >= Map_X) continue;
+
+            float h = dev_heightmap[nr * Map_X + nc];
+            if (h < 0.0f) continue;  // unknown
+
+            hl[nl] = h;
+            xl[nl] = dc * cellSize;
+            zl[nl] = dr * cellSize;
+            nl++;
+
+            if (h < raw_min) raw_min = h;
+            if (h > raw_max) raw_max = h;
+        }
+    }
+
+    if (nl < 3) {
+        dev_slope[z * Map_X + x] = -1.0f;
+        return;
+    }
+
+    float sx, sz;
+    getSlopeOfPoints(hl, xl, zl, nl, sx, sz);
+    float localSlope = sqrtf(sx * sx + sz * sz);
+
+    float heightRange = (raw_max - raw_min) / cellSize;
+
+    // --- Глобальный slope (окно estimation_size) ---
+    float globalSlope = 0.0f;
+    if (estimation_size > 1) {
+        // Динамический массив плохо, ограничим размер
+        const int MAX_N = 121;  // (2*5+1)^2 = 121 для estimation_size=5
+        float hg[MAX_N], xg[MAX_N], zg[MAX_N];
+        int ng = 0;
+
+        for (int dr = -estimation_size; dr <= estimation_size; ++dr) {
+            for (int dc = -estimation_size; dc <= estimation_size; ++dc) {
+                if (ng >= MAX_N) break;
+                int nr = z + dr;
+                int nc = x + dc;
+                if (nr < 0 || nr >= Map_Z || nc < 0 || nc >= Map_X) continue;
+
+                float h = dev_heightmap[nr * Map_X + nc];
+                if (h < 0.0f) continue;
+
+                hg[ng] = h;
+                xg[ng] = dc * cellSize;
+                zg[ng] = dr * cellSize;
+                ng++;
+            }
+        }
+
+        if (ng >= 3) {
+            float gx, gz;
+            getSlopeOfPoints(hg, xg, zg, ng, gx, gz);
+            globalSlope = sqrtf(gx * gx + gz * gz);
+        }
+    }
+
+    // --- Итог = max(локальный, глобальный, размах) ---
+    float result = localSlope;
+    if (globalSlope > result) result = globalSlope;
+    if (heightRange > result) result = heightRange;
+
+    dev_slope[z * Map_X + x] = result;
+}
+
+__global__ void slope_to_costmap_cuda(const float* __restrict__ dev_slope, uint8_t* __restrict__ dev_costmap, float max_slope, float flat_slope)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int z = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= Map_X || z >= Map_Z) return;
+
+    int idx = z * Map_X + x;
+    float s = dev_slope[idx];
+    uint8_t cost;
+
+    if (s < 0.0f) cost = 255;              // unknown
+    else if (s > max_slope) cost = 254;    // lethal
+    else if (s < flat_slope) cost = 0;     // free
+    else {
+        float norm = (s - flat_slope) / (max_slope - flat_slope);
+        float c = 252.0f * norm;
+        cost = (uint8_t)(c < 1.0f ? 1.0f : (c > 252.0f ? 252.0f : c));
+    }
+
+    dev_costmap[idx] = cost;
+}
+
+// Основное ядро обработки
+__global__ void processLayerKernel(uint8_t* data, int16_t layer_y, int16_t robot_height, int16_t current_y)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int z = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= Map_X || z >= Map_Z) return;
+
+    // Проверяем слой layer_y
+    if (data[get_value(x, layer_y, z)] == 0) return;
+
+    // Ищем самый верхний occupied в [layer_y, layer_y + robot_height]
+    int y_top = layer_y;
+    int y_max = min(layer_y + robot_height, Map_Y - 1);
+    for (int yy = layer_y + 1; yy <= y_max; yy++) {
+        if (data[get_value(x, yy, z)] != 0) {
+            y_top = yy;
+        }
+    }
+
+    // Удаляем всё выше и ниже y_top
+    for (int yy = 0; yy < Map_Y; yy++) {
+        if (yy != y_top) {
+            data[get_value(x, yy, z)] = 0;
+        }
+    }
+}
+
+
+
+// Ядро для поиска контуров в 2д карте
+__global__ void findContoursKernel_2d(uint8_t* data)
+{
     uint16_t x = blockIdx.x * blockDim.x + threadIdx.x;
-    uint16_t z = blockIdx.y * blockDim.y + threadIdx.y;
+    uint16_t y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= 400 || y >= 400) return;
 
-    // Проверяем границы
-    if (x >= 400 || z >= 400) return;
+    uint32_t idx = get_value_2d(x, y);
+    uint8_t cell = data[idx];
 
-    uint32_t idx = get_value(x, layer_y, z);
+    // Обводим только проходимые ячейки (0..252)
+    if (cell > 252) return;   // 253, 254, 255 — не трогаем
 
-    // Если текущая ячейка свободна - пропускаем
-    if (data[idx] == 0) return;
-
-     // Проверяем наложение блоков overlay filter
-    if(data[get_value(x, layer_y + 1, z)]){ data[idx] = 0; return; }
-
-    // Проверяем 4-связных соседей в плоскости XY
+    // 4-связные соседи (проще и меньше ложных границ)
     int16_t dx[4] = {0, 0, -1, 1};
-    int16_t dz[4] = {-1, 1, 0, 0};
+    int16_t dy[4] = {-1, 1, 0, 0};
 
     for (int8_t i = 0; i < 4; ++i) {
         int16_t nx = x + dx[i];
-        int16_t nz = z + dz[i];
-
-        // Если сосед за границами массива или свободен - это граница
-        if (nx < 0 || nx >= 400 || nz < 0 || nz >= 400 || data[get_value(nx, layer_y, nz)] == 0) {
-
-            data[idx] = calculate_height_value(layer_y, current_y);
-
-            break;
-        }
-    }
-}
-
-
-// Основное ядро обработки
-__global__ void processLayerKernel(uint8_t* data, int16_t layer_y, int16_t robot_height, int16_t current_y) {
-    // Вычисляем координаты x и z для текущего потока
-    uint16_t x = blockIdx.x * blockDim.x + threadIdx.x;
-    uint16_t z = blockIdx.y * blockDim.y + threadIdx.y;
-
-    // Проверяем границы
-    if (x >= 400 || z >= 400) return;
-
-    // 1. Обработка верхней области (y от layer_y + 1 до 100)
-    uint32_t base_idx = get_value(x, layer_y, z);
-
-    // Пропускаем свободные ячейки
-    if (data[base_idx] == 0) return;
-
-    // Проверяем наложение блоков overlay filter
-   if(data[get_value(x, layer_y + 1, z)]){ data[base_idx] = 0; return; }
-
-    bool is_contour = (data[base_idx] > 1 && data[base_idx] < 100);
-    bool has_occupied_in_range = false;
-    uint8_t occupied_count = 0;
-    int16_t first_occupied_height = -1;
-    robot_height += 1;
-
-    // Проверяем ячейки выше
-    for (int16_t y = layer_y + 1; y <= layer_y + robot_height; y++) {
-        if (y >= 100) break;
-
-        uint32_t idx = get_value(x, y, z);
-        if (data[idx] != 0) {
-            has_occupied_in_range = true;
-            occupied_count++;
-            if (first_occupied_height == -1) {
-                first_occupied_height = y;
-            }
-        }
-    }
-
-    // Обработка в зависимости от типа ячейки
-    if (is_contour) {
-        // Случай 4: Ячейка контура
-        if (has_occupied_in_range) {
-            // 4.1: Есть занятые ячейки выше
-            data[base_idx] = 254;
-
-            // Удаляем занятые ячейки в диапазоне
-            for (int16_t y = layer_y + 1; y <= layer_y + robot_height; y++) {
-                if (y >= 100) break;
-                uint32_t idx = get_value(x, y, z);
-                data[idx] = 0;
-            }
-        } else {
-            // 4.2: Нет занятых ячеек выше
-            data[base_idx] = 1 + calculate_height_value(layer_y, current_y);
-        }
-    } else {
-        // Обычная занятая ячейка
-        if (!has_occupied_in_range) {
-            // Случай 1: Нет занятых ячеек на высоте робота
-            data[base_idx] = 1;
-        } else if (occupied_count == 1 && first_occupied_height == layer_y + 1) {
-            // Случай 2: Ровно одна занятая ячейка сразу над текущей
-            uint32_t above_idx = get_value(x, layer_y + 1, z);
-            data[above_idx] = 0;
-            data[base_idx] = 1 + calculate_height_value(layer_y, current_y);
-        } else {
-            // Случай 3: Несколько занятых ячеек выше
-            data[base_idx] = 254;
-
-            // Удаляем все занятые ячейки в диапазоне
-            for (int16_t y = layer_y + 1; y <= layer_y + robot_height; y++) {
-                if (y >= 100) break;
-                uint32_t idx = get_value(x, y, z);
-                data[idx] = 0;
-            }
-        }
-    }
-
-    // Удаляем ячейки выше robot_height
-       for (int16_t y = layer_y + robot_height + 1; y < 100; y++) {
-           uint32_t idx = get_value(x, y, z);
-           data[idx] = 0;
-       }
-
-    // 2. Обработка нижней области (y от 0 до current_y - 1)
-    for (int16_t y = 0; y < layer_y - 1; y++) {
-        uint32_t idx = get_value(x, y, z);
-        data[idx] = 0;
-    }
-}
-
-// Ядро для поиска контуров в 2д карте
-__global__ void findContoursKernel_2d(uint8_t* data) {
-    // Вычисляем координаты x и z для текущего потока
-    uint16_t x = blockIdx.x * blockDim.x + threadIdx.x;
-    uint16_t y = blockIdx.y * blockDim.y + threadIdx.y;
-
-    // Проверяем границы
-    if (x >= 400 || y >= 400) return;
-
-    uint32_t idx = get_value_2d(x, y);
-
-    // Если текущая ячейка свободна - пропускаем
-    if (data[idx] == 0) return;
-
-    // Проверяем 8-связных соседей в плоскости XY
-    int16_t dx[8] = {0, 0, -1, 1, 1, -1,  1, -1};
-    int16_t dy[8] = {-1, 1, 0, 0, 1, -1, -1,  1};
-
-    uint8_t current_cell = data[idx];
-
-    for (int8_t i = 0; i < 8; ++i) {
-        int16_t nx = x + dx[i];
         int16_t ny = y + dy[i];
 
-        // Если сосед за границами массива или свободен - это граница
-        if (nx < 0 || nx >= 400 || ny < 0 || ny >= 400 || data[get_value_2d(nx, ny)] == 0 || 2 >= abs(nx - current_cell) || 2 >= abs(ny - current_cell)) {
-
+        // Границы карты — считаем «непроходимым» краем
+        if (nx < 0 || nx >= 400 || ny < 0 || ny >= 400) {
             data[idx] = 254;
+            return;
+        }
 
-            break;
+        uint8_t neighbor = data[get_value_2d(nx, ny)];
+
+        // Сосед непроходим (252 или 255) → это граница
+        if (neighbor == 255) {
+            data[idx] = 254;
+            return;
         }
     }
 }
 
-__global__ void Convert_3D_voxels_map_to_2d_cost_map(const uint8_t* input_3d,  uint8_t* output_2d,  bool mirror_x, bool mirror_z ) {
-    // Вычисляем координаты x и z для текущего потока
-    uint16_t x = blockIdx.x * blockDim.x + threadIdx.x;
-    uint16_t z = blockIdx.y * blockDim.y + threadIdx.y;
-
-    // Проверяем границы
-    if (x >= 400 || z >= 400) return;
-
-    // Применяем зеркальное отображение к координатам выхода
-    uint16_t output_x = mirror_x ? (399 - x) : x;
-    uint16_t output_y = mirror_z ? (399 - z) : z;
-
-    // Проходим по высоте от 0 до 99
-    for (uint16_t y = 0; y < 100; ++y) {
-        // Вычисляем индекс в 3D массиве (оригинальные координаты)
-        uint32_t index = z * 40000 + y * 400 + x;
-
-        // Если нашли ненулевое значение
-        if (input_3d[index] != 0) {
-            // Записываем его в 2D массив в зеркальную позицию
-            uint32_t output_index = output_y * 400 + output_x;
-            output_2d[output_index] = input_3d[index];
-            break;
-        }
-    }
-
-
-}
-
-__global__ void Normalize_2d_cost_map(uint8_t* output_2d)
+__global__ void inflate_costmap_cuda(
+    const uint8_t* __restrict__ dev_input,
+    uint8_t* __restrict__ dev_output,
+    int inscribed_radius,
+    int inflation_radius,
+    float cost_scaling_factor)
 {
-    // Вычисляем координаты x и z для текущего потока
-    uint16_t x = blockIdx.x * blockDim.x + threadIdx.x;
-    uint16_t y = blockIdx.y * blockDim.y + threadIdx.y;
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int z = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= Map_X || z >= Map_Z) return;
 
-    // Проверяем границы
-    if (x >= 400 || y >= 400) return;
+    int idx = z * Map_X + x;
 
-    uint32_t idx = get_value_2d(x, y);
+    // Lethal — копируем, не инфлируем (но он ТОЖЕ инфлирует соседей)
+    if (dev_input[idx] == 254) {
+        dev_output[idx] = 254;
+        return;
+    }
 
-    if (output_2d[idx] == 0) output_2d[idx] = 255;
+    // Unknown — копируем, не инфлируем
+    if (dev_input[idx] == 255) {
+        dev_output[idx] = 255;
+        return;
+    }
 
-    if (output_2d[idx] == 1) output_2d[idx] = 0;
+    // Для остальных ячеек (free, medium) — ищем ближайшее lethal
+    int min_dist_sq = (inflation_radius + 1) * (inflation_radius + 1);
+    for (int dz = -inflation_radius; dz <= inflation_radius; dz++) {
+        for (int dx = -inflation_radius; dx <= inflation_radius; dx++) {
+            int nx = x + dx;
+            int nz = z + dz;
+            if (nx < 0 || nx >= Map_X || nz < 0 || nz >= Map_Z) continue;
+            if (dev_input[nz * Map_X + nx] == 254) {
+                int d_sq = dx * dx + dz * dz;
+                if (d_sq < min_dist_sq) min_dist_sq = d_sq;
+            }
+        }
+    }
+
+    // Нет lethal в радиусе — копируем без изменений
+    if (min_dist_sq > inflation_radius * inflation_radius) {
+        dev_output[idx] = dev_input[idx];
+        return;
+    }
+
+    float dist = sqrtf((float)min_dist_sq);
+    if (dist <= (float)inscribed_radius) {
+        dev_output[idx] = 253;   // inscribed
+    } else {
+        float dist_rel = dist - (float)inscribed_radius;
+        float max_dist = (float)(inflation_radius - inscribed_radius);
+        if (max_dist < 1e-6f) max_dist = 1e-6f;
+        float val = 252.0f * expf(-cost_scaling_factor * (dist_rel / max_dist));
+        dev_output[idx] = (uint8_t)(val < 1.0f ? 1.0f : (val > 252.0f ? 252.0f : val));
+    }
+}
+
+
+__global__ void Convert_3D_voxels_map_to_2d_cost_map( const uint8_t* __restrict__ input_3d, float* __restrict__ output_heightmap)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int z = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= Map_X || z >= Map_Z) return;
+
+    // Ищем верхний occupied
+    int y_top = -1;
+    for (int y = Map_Y - 1; y >= 0; y--) {
+        if (input_3d[get_value(x, y, z)] != 0) {
+            y_top = y;
+            break;
+        }
+    }
+
+    output_heightmap[z * Map_X + x] = (y_top < 0) ? -1.0f : (float)y_top;
 }
 
 
@@ -903,40 +1005,40 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     float *dev_serializ_point;
 
     result = cudaMalloc(&dev_ray_points, count * sizeof(uint16_t) * 3);
-    std::cout << "Stage 1 (malloc ray_points)" << std::endl;
+    //std::cout << "Stage 1 (malloc ray_points)" << std::endl;
     assert(result == cudaSuccess);
 
     result = cudaMalloc(&dev_depth, count * sizeof(uint16_t));
-    std::cout << "Stage 2 (malloc depth)" << std::endl;
+    //std::cout << "Stage 2 (malloc depth)" << std::endl;
     assert(result == cudaSuccess);
 
     result = cudaMalloc(&dev_intrin, sizeof(rs2_intrinsics));
-    std::cout << "Stage 3 (malloc intrin)" << std::endl;
+    //std::cout << "Stage 3 (malloc intrin)" << std::endl;
     assert(result == cudaSuccess);
 
     uint32_t blocks = (Map_length + RS2_CUDA_THREADS_PER_BLOCK - 1) / RS2_CUDA_THREADS_PER_BLOCK;
 
     result = cudaMalloc(&dev_local_counter, blocks * sizeof(uint32_t));
-    std::cout << "Stage 4 (malloc local_counter, blocks=" << blocks << ")" << std::endl;
+    //std::cout << "Stage 4 (malloc local_counter, blocks=" << blocks << ")" << std::endl;
     assert(result == cudaSuccess);
 
     result = cudaMemset(dev_local_counter, 0, blocks * sizeof(uint32_t));
-    std::cout << "Stage 5 (memset local_counter)" << std::endl;
+    //std::cout << "Stage 5 (memset local_counter)" << std::endl;
     assert(result == cudaSuccess);
 
     result = cudaMalloc(&dev_serializ_point, Map_length * sizeof(float));
-    std::cout << "Stage 6 (malloc serializ_point)" << std::endl;
+    //std::cout << "Stage 6 (malloc serializ_point)" << std::endl;
     assert(result == cudaSuccess);
 
     // ========================================================================
     // ЗАГРУЗКА ГЛУБИНЫ И ИНТРИНСИКОВ
     // ========================================================================
     result = cudaMemcpy(dev_depth, depth, count * sizeof(uint16_t), cudaMemcpyHostToDevice);
-    std::cout << "Stage 7 (memcpy depth)" << std::endl;
+    //std::cout << "Stage 7 (memcpy depth)" << std::endl;
     assert(result == cudaSuccess);
 
     result = cudaMemcpy(dev_intrin, &intrin, sizeof(rs2_intrinsics), cudaMemcpyHostToDevice);
-    std::cout << "Stage 8 (memcpy intrin)" << std::endl;
+    //std::cout << "Stage 8 (memcpy intrin)" << std::endl;
     assert(result == cudaSuccess);
 
     // ========================================================================
@@ -949,7 +1051,7 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     crop_depth_borders<<<gridSize, blockSize>>>(dev_depth, intrin.width, intrin.height,
                                                  border_top, border_bottom, border_left, border_right);
     result = cudaDeviceSynchronize();
-    std::cout << "Stage 9 (crop_depth_borders)" << std::endl;
+    //std::cout << "Stage 9 (crop_depth_borders)" << std::endl;
     assert(result == cudaSuccess);
 
     // ========================================================================
@@ -960,7 +1062,7 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
         depth_scale, w, x, y, z);
 
     result = cudaDeviceSynchronize();
-    std::cout << "Stage 10 (kernel_deproject_depth_cuda)" << std::endl;
+    //std::cout << "Stage 10 (kernel_deproject_depth_cuda)" << std::endl;
     assert(result == cudaSuccess);
 
     cudaFree(dev_depth);
@@ -972,7 +1074,7 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     ray_casting_map<<<128, 128>>>(dev_voxels, dev_ray_points, count);
 
     result = cudaDeviceSynchronize();
-    std::cout << "Stage 11 (ray_casting_map camera)" << std::endl;
+    //std::cout << "Stage 11 (ray_casting_map camera)" << std::endl;
     assert(result == cudaSuccess);
 
     // ========================================================================
@@ -981,7 +1083,7 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     voxelization_cuda<<<128, 128>>>(dev_voxels, dev_ray_points, count);
 
     result = cudaDeviceSynchronize();
-    std::cout << "Stage 12 (voxelization_cuda)" << std::endl;
+    //std::cout << "Stage 12 (voxelization_cuda)" << std::endl;
     assert(result == cudaSuccess);
 
     cudaFree(dev_ray_points);
@@ -993,18 +1095,18 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     if (lidar_size > 0) {
         int16_t *dev_lidar_pcl;
         result = cudaMalloc(&dev_lidar_pcl, lidar_size * 3 * sizeof(int16_t));
-        std::cout << "Stage 13.1 (malloc lidar_pcl, size=" << lidar_size << ")" << std::endl;
+        //std::cout << "Stage 13.1 (malloc lidar_pcl, size=" << lidar_size << ")" << std::endl;
         assert(result == cudaSuccess);
 
         result = cudaMemcpy(dev_lidar_pcl, lidar_pcl,
                             lidar_size * 3 * sizeof(int16_t), cudaMemcpyHostToDevice);
-        std::cout << "Stage 13.2 (memcpy lidar_pcl)" << std::endl;
+        //std::cout << "Stage 13.2 (memcpy lidar_pcl)" << std::endl;
         assert(result == cudaSuccess);
 
         // Ray casting — зачищаем free space по актуальному скану
         ray_casting_map_lidar<<<128, 128>>>(dev_voxels, dev_lidar_pcl, lidar_size);
         result = cudaDeviceSynchronize();
-        std::cout << "Stage 13.3 (ray_casting_map_lidar)" << std::endl;
+        //std::cout << "Stage 13.3 (ray_casting_map_lidar)" << std::endl;
         assert(result == cudaSuccess);
 
         cudaFree(dev_lidar_pcl);
@@ -1013,18 +1115,18 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     if (keyframe_size > 0) {
         int16_t *dev_keyframe_pcl;
         result = cudaMalloc(&dev_keyframe_pcl, keyframe_size * 3 * sizeof(int16_t));
-        std::cout << "Stage 13.4 (malloc keyframe_pcl, size=" << keyframe_size << ")" << std::endl;
+        //std::cout << "Stage 13.4 (malloc keyframe_pcl, size=" << keyframe_size << ")" << std::endl;
         assert(result == cudaSuccess);
 
         result = cudaMemcpy(dev_keyframe_pcl, keyframe_pcl,
                             keyframe_size * 3 * sizeof(int16_t), cudaMemcpyHostToDevice);
-        std::cout << "Stage 13.5 (memcpy keyframe_pcl)" << std::endl;
+        //std::cout << "Stage 13.5 (memcpy keyframe_pcl)" << std::endl;
         assert(result == cudaSuccess);
 
         // voxelization — ставим occupied по накопленному keyframe
         voxelization_cuda_lidar<<<128, 128>>>(dev_voxels, dev_keyframe_pcl, keyframe_size);
         result = cudaDeviceSynchronize();
-        std::cout << "Stage 13.6 (voxelization_cuda_lidar keyframe)" << std::endl;
+        //std::cout << "Stage 13.6 (voxelization_cuda_lidar keyframe)" << std::endl;
         assert(result == cudaSuccess);
 
         cudaFree(dev_keyframe_pcl);
@@ -1037,12 +1139,12 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     count_map_size_2<<<blocks, RS2_CUDA_THREADS_PER_BLOCK>>>(dev_voxels, dev_local_counter, Map_length);
 
     result = cudaDeviceSynchronize();
-    std::cout << "Stage 14 (count_map_size_2)" << std::endl;
+    //std::cout << "Stage 14 (count_map_size_2)" << std::endl;
     assert(result == cudaSuccess);
 
     uint32_t *h_result = new uint32_t[blocks];
     result = cudaMemcpy(h_result, dev_local_counter, blocks * sizeof(uint32_t), cudaMemcpyDeviceToHost);
-    std::cout << "Stage 15 (memcpy count result)" << std::endl;
+    //std::cout << "Stage 15 (memcpy count result)" << std::endl;
     assert(result == cudaSuccess);
 
     uint32_t total_sum = 0;
@@ -1050,20 +1152,20 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     delete[] h_result;
 
     *world_counter = total_sum;
-    std::cout << "Stage 16 (world_counter = " << total_sum << ")" << std::endl;
+    //std::cout << "Stage 16 (world_counter = " << total_sum << ")" << std::endl;
 
     // ========================================================================
     // СЕРИАЛИЗАЦИЯ
     // ========================================================================
     cudaMemset(dev_local_counter, 0, blocks * sizeof(uint32_t));
-    std::cout << "Stage 17 (reset local_counter)" << std::endl;
+    //std::cout << "Stage 17 (reset local_counter)" << std::endl;
     assert(result == cudaSuccess);
 
     serialization_cuda_2<<<blocks, RS2_CUDA_THREADS_PER_BLOCK>>>(
         dev_voxels, dev_serializ_point, dev_local_counter, Map_length);
 
     result = cudaDeviceSynchronize();
-    std::cout << "Stage 18 (serialization_cuda_2)" << std::endl;
+    //std::cout << "Stage 18 (serialization_cuda_2)" << std::endl;
     assert(result == cudaSuccess);
 
     // ========================================================================
@@ -1072,21 +1174,21 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     offset_cuda_2<<<128, 128>>>(dev_serializ_point, dev_local_counter, x_, y_, z_);
 
     result = cudaDeviceSynchronize();
-    std::cout << "Stage 19 (offset_cuda_2)" << std::endl;
+    //std::cout << "Stage 19 (offset_cuda_2)" << std::endl;
     assert(result == cudaSuccess);
 
     // ========================================================================
     // ДЕСЕРИАЛИЗАЦИЯ
     // ========================================================================
     result = cudaMemset(dev_voxels, 0, Map_length);
-    std::cout << "Stage 20 (memset dev_voxels)" << std::endl;
+    //std::cout << "Stage 20 (memset dev_voxels)" << std::endl;
     assert(result == cudaSuccess);
 
     deserialization_cuda_2<<<blocks, RS2_CUDA_THREADS_PER_BLOCK>>>(
         dev_serializ_point, dev_voxels, total_sum);
 
     result = cudaDeviceSynchronize();
-    std::cout << "Stage 21 (deserialization_cuda_2)" << std::endl;
+    //std::cout << "Stage 21 (deserialization_cuda_2)" << std::endl;
     assert(result == cudaSuccess);
 
     // ========================================================================
@@ -1094,7 +1196,7 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     // ========================================================================
     float *buff = (float*)malloc(total_sum * sizeof(float));
     result = cudaMemcpy(buff, dev_serializ_point, total_sum * sizeof(float), cudaMemcpyDeviceToHost);
-    std::cout << "Stage 22 (memcpy serializ_point to CPU)" << std::endl;
+    //std::cout << "Stage 22 (memcpy serializ_point to CPU)" << std::endl;
     assert(result == cudaSuccess);
 
     *serialization_point_1 = buff;
@@ -1106,7 +1208,7 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     cudaFree(dev_serializ_point);
 
     result = cudaDeviceSynchronize();
-    std::cout << "Stage 23 (final sync)" << std::endl;
+    //std::cout << "Stage 23 (final sync)" << std::endl;
     assert(result == cudaSuccess);
 
 }
@@ -1115,6 +1217,7 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
 // Построение 2D costmap из 3D воксельной карты
 // ============================================================================
 
+
 extern "C"
 __host__
 void process_costmap_cuda(uint8_t *dev_voxels, uint8_t *dev_costmap,
@@ -1122,376 +1225,443 @@ void process_costmap_cuda(uint8_t *dev_voxels, uint8_t *dev_costmap,
 {
     cudaError_t result;
 
-    uint8_t layer_y[100];
-    compute_layer_y(layer_y, current_y);
+    const float max_slope    = 3.0f;
+    const float flat_slope   = 0.1f;
+    const int   inscribed_r  = 2;
+    const int   inflation_r  = 4;
+    const float cost_scaling = 15.0f;
+    const int estimation_size = 1;
 
     dim3 blockSize_2d(16, 16);
     dim3 gridSize_2d((400 + 15) / 16, (400 + 15) / 16);
 
-    assert(dev_voxels != nullptr && "dev_voxels is null");
-    assert(dev_costmap != nullptr && "dev_costmap is null");
+    // ========================================================================
+    // Локальные буферы
+    // ========================================================================
+    uint8_t* dev_voxels_copy;
+    float*   dev_heightmap;
+    float*   dev_slope;
+    uint8_t* dev_costmap_tmp;
+    int*     dev_robot_y;
 
+    result = cudaMalloc(&dev_voxels_copy, Map_length);
+    assert(result == cudaSuccess);
+    result = cudaMalloc(&dev_heightmap, Map_X * Map_Z * sizeof(float));
+    assert(result == cudaSuccess);
+    result = cudaMalloc(&dev_slope, Map_X * Map_Z * sizeof(float));
+    assert(result == cudaSuccess);
+    result = cudaMalloc(&dev_costmap_tmp, Map_X * Map_Z);
+    assert(result == cudaSuccess);
+    result = cudaMalloc(&dev_robot_y, sizeof(int));
+    assert(result == cudaSuccess);
+
+    // ========================================================================
+    // Шаг 0: Копия dev_voxels → dev_voxels_copy
+    // ========================================================================
+    result = cudaMemcpy(dev_voxels_copy, dev_voxels, Map_length, cudaMemcpyDeviceToDevice);
+    assert(result == cudaSuccess);
+    //std::cout << "Costmap Stage 0 (copy dev_voxels)" << std::endl;
+
+    // ========================================================================
+    // Шаг 1: Поиск высоты робота
+    // ========================================================================
+    find_robot_height_kernel<<<1, 1>>>(dev_voxels_copy, dev_robot_y, DEFAULT_ROBOT_Y);
+    result = cudaDeviceSynchronize();
+    assert(result == cudaSuccess);
+
+    int robot_y = current_y;
+    result = cudaMemcpy(&robot_y, dev_robot_y, sizeof(int), cudaMemcpyDeviceToHost);
+    assert(result == cudaSuccess);
+
+    //std::cout << "Costmap: robot_y = " << robot_y << " (был " << current_y << ")" << std::endl;
+
+    uint8_t layer_y[100];
+    compute_layer_y(layer_y, robot_y);
+
+    // ========================================================================
+    // Шаг 2: Обход 100 слоёв (processLayerKernel)
+    // ========================================================================
     cudaStream_t stream;
     cudaGraph_t graph;
     cudaGraphExec_t graphExec;
 
-    result = cudaStreamCreate(&stream);
-    std::cout << "Costmap Stage 1 (stream create)" << std::endl;
-    assert(result == cudaSuccess && "Failed to create CUDA stream");
-
-    result = cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
-    std::cout << "Costmap Stage 2 (begin capture)" << std::endl;
-    assert(result == cudaSuccess && "Failed to begin stream capture");
+    cudaStreamCreate(&stream);
+    cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
 
     // =========================================================================
     // ВАЖНО: захват в цикле for не работает корректно. Нужно развернуть вручную.
     // =========================================================================
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[0], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[0], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[1], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[1], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[0], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[2], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[2], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[3], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[3], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[1], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[4], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[4], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[5], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[5], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[2], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[6], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[6], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[7], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[7], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[3], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[8], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[8], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[9], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[9], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[4], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[10], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[10], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[11], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[11], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[5], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[12], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[12], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[13], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[13], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[6], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[14], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[14], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[15], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[15], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[7], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[16], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[16], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[17], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[17], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[8], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[18], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[18], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[19], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[19], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[9], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[20], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[20], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[21], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[21], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[10], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[22], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[22], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[23], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[23], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[11], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[24], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[24], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[25], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[25], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[12], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[26], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[26], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[27], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[27], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[13], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[28], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[28], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[29], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[29], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[14], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[30], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[30], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[31], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[31], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[15], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[32], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[32], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[33], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[33], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[16], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[34], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[34], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[35], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[35], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[17], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[36], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[36], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[37], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[37], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[18], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[38], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[38], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[39], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[39], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[19], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[40], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[40], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[41], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[41], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[20], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[42], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[42], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[43], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[43], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[21], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[44], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[44], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[45], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[45], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[22], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[46], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[46], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[47], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[47], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[23], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[48], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[48], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[49], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[49], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[24], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[50], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[50], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[51], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[51], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[25], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[52], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[52], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[53], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[53], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[26], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[54], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[54], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[55], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[55], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[27], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[56], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[56], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[57], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[57], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[28], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[58], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[58], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[59], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[59], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[29], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[60], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[60], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[61], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[61], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[30], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[62], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[62], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[63], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[63], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[31], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[64], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[64], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[65], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[65], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[32], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[66], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[66], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[67], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[67], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[33], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[68], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[68], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[69], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[69], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[34], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[70], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[70], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[71], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[71], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[35], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[72], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[72], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[73], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[73], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[36], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[74], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[74], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[75], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[75], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[37], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[76], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[76], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[77], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[77], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[38], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[78], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[78], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[79], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[79], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[39], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[80], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[80], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[81], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[81], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[40], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[82], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[82], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[83], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[83], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[41], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[84], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[84], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[85], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[85], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[42], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[86], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[86], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[87], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[87], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[43], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[88], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[88], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[89], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[89], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[44], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[90], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[90], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[91], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[91], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[45], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[92], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[92], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[93], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[93], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[46], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[94], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[94], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[95], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[95], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[47], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[96], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[96], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[97], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[97], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[48], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[98], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[98], current_y, 5);
 
-    findContoursKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[99], current_y);
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels, layer_y[99], current_y, 5);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[49], robot_y, ROBOT_HEIGHT);
 
 
-    result = cudaStreamEndCapture(stream, &graph);
-    std::cout << "Costmap Stage 3 (end capture)" << std::endl;
-    assert(result == cudaSuccess && "Failed to end stream capture");
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[50], robot_y, ROBOT_HEIGHT);
 
-    result = cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);
-    std::cout << "Costmap Stage 4 (graph instantiate)" << std::endl;
-    assert(result == cudaSuccess && "Failed to instantiate graph");
 
-    result = cudaGraphLaunch(graphExec, stream);
-    std::cout << "Costmap Stage 5 (graph launch)" << std::endl;
-    assert(result == cudaSuccess && "Failed to launch graph");
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[51], robot_y, ROBOT_HEIGHT);
 
-    result = cudaStreamSynchronize(stream);
-    std::cout << "Costmap Stage 6 (stream sync)" << std::endl;
-    assert(result == cudaSuccess && "Failed to synchronize stream after graph execution");
 
-    result = cudaGetLastError();
-    std::cout << "Costmap Stage 7 (get last error)" << std::endl;
-    assert(result == cudaSuccess && "Kernel execution failed");
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[52], robot_y, ROBOT_HEIGHT);
 
-    result = cudaGraphExecDestroy(graphExec);
-    result = cudaGraphDestroy(graph);
-    result = cudaStreamDestroy(stream);
 
-    // =========================================================================
-    // 2D costmap
-    // =========================================================================
-    Convert_3D_voxels_map_to_2d_cost_map<<<gridSize_2d, blockSize_2d>>>(dev_voxels, dev_costmap, false, false);
-    std::cout << "Costmap Stage 8 (Convert_3D_to_2d)" << std::endl;
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[53], robot_y, ROBOT_HEIGHT);
 
-    findContoursKernel_2d<<<gridSize_2d, blockSize_2d>>>(dev_costmap);
-    std::cout << "Costmap Stage 9 (findContoursKernel_2d)" << std::endl;
 
-    Normalize_2d_cost_map<<<gridSize_2d, blockSize_2d>>>(dev_costmap);
-    std::cout << "Costmap Stage 10 (Normalize_2d_cost_map)" << std::endl;
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[54], robot_y, ROBOT_HEIGHT);
 
-    result = cudaGetLastError();
-    assert(result == cudaSuccess && "costmap kernels failed");
 
-    result = cudaMemcpy(costmap_host, dev_costmap, Map_X * Map_Z, cudaMemcpyDeviceToHost);
-    std::cout << "Costmap Stage 11 (memcpy costmap to CPU)" << std::endl;
-    assert(result == cudaSuccess);
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[55], robot_y, ROBOT_HEIGHT);
 
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[56], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[57], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[58], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[59], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[60], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[61], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[62], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[63], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[64], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[65], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[66], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[67], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[68], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[69], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[70], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[71], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[72], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[73], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[74], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[75], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[76], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[77], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[78], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[79], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[80], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[81], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[82], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[83], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[84], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[85], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[86], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[87], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[88], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[89], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[90], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[91], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[92], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[93], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[94], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[95], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[96], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[97], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[98], robot_y, ROBOT_HEIGHT);
+
+
+    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[99], robot_y, ROBOT_HEIGHT);
+
+
+    cudaStreamEndCapture(stream, &graph);
+    cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);
+    cudaGraphLaunch(graphExec, stream);
+    cudaStreamSynchronize(stream);
+    cudaGraphExecDestroy(graphExec);
+    cudaGraphDestroy(graph);
+    cudaStreamDestroy(stream);
+    //std::cout << "Costmap Stage 2 (100 layers)" << std::endl;
+
+    // ========================================================================
+    // Шаг 3: Схлопывание 3D → heightmap
+    // ========================================================================
+    Convert_3D_voxels_map_to_2d_cost_map<<<gridSize_2d, blockSize_2d>>>(dev_voxels_copy, dev_heightmap);
     result = cudaDeviceSynchronize();
-    std::cout << "Costmap Stage 12 (final sync)" << std::endl;
     assert(result == cudaSuccess);
+    //std::cout << "Costmap Stage 3 (heightmap)" << std::endl;
+
+    // ========================================================================
+    // Шаг 4: Slope
+    // ========================================================================
+    heightmap_to_slope_cuda<<<gridSize_2d, blockSize_2d>>>(dev_heightmap, dev_slope, estimation_size);
+    result = cudaDeviceSynchronize();
+    assert(result == cudaSuccess);
+    //std::cout << "Costmap Stage 4 (slope)" << std::endl;
+
+    // ========================================================================
+    // Шаг 5: Costmap из slope
+    // ========================================================================
+    slope_to_costmap_cuda<<<gridSize_2d, blockSize_2d>>>(dev_slope, dev_costmap, max_slope, flat_slope);
+    result = cudaDeviceSynchronize();
+    assert(result == cudaSuccess);
+
+    //std::cout << "Costmap Stage 5 (costmap)" << std::endl;
+
+    // ========================================================================
+    // Шаг 6: Контуры
+    // ========================================================================
+    findContoursKernel_2d<<<gridSize_2d, blockSize_2d>>>(dev_costmap);
+    result = cudaDeviceSynchronize();
+    assert(result == cudaSuccess);
+
+    cudaMemcpy(dev_costmap_tmp, dev_costmap, Map_X * Map_Z, cudaMemcpyDeviceToDevice);
+    //std::cout << "Costmap Stage 6 (findContours)" << std::endl;
+
+    // ========================================================================
+    // Шаг 7: Инфляция
+    // ========================================================================
+    inflate_costmap_cuda<<<gridSize_2d, blockSize_2d>>>(dev_costmap_tmp, dev_costmap, inscribed_r, inflation_r, cost_scaling);
+    result = cudaDeviceSynchronize();
+    assert(result == cudaSuccess);
+
+
+    //std::cout << "Costmap Stage 7 (inflate)" << std::endl;
+
+    // ========================================================================
+    // Шаг 8: Копия на CPU
+    // ========================================================================
+    cudaMemcpy(costmap_host, dev_costmap, Map_X * Map_Z, cudaMemcpyDeviceToHost);
+    //std::cout << "Costmap Stage 8 (memcpy to CPU)" << std::endl;
+
+    // ========================================================================
+    // Освобождение
+    // ========================================================================
+    cudaFree(dev_voxels_copy);
+    cudaFree(dev_heightmap);
+    cudaFree(dev_slope);
+    cudaFree(dev_costmap_tmp);
+    cudaFree(dev_robot_y);
+
+    cudaDeviceSynchronize();
+    //std::cout << "Costmap Stage 9 (final sync)" << std::endl;
 }
