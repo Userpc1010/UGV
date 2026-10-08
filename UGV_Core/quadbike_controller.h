@@ -2,6 +2,7 @@
 #define QUADBIKE_CONTROLLER_H
 
 #include "data.h"
+#include <protocol.h>
 #include "rgbd_camera.h"
 #include <QObject>
 #include <QTimer>
@@ -37,12 +38,14 @@ private:
     QTimer * timer_uart;
 
     // Структуры для STM32
-    PCA9685 pca;
-    MPPI_Ctrl mppi_ctrl;
+    Pkt_PCA_t pca;
+    Pkt_MPI_t mppi_ctrl;
     ctrl_mode_t current_mode = CTRL_MODE_MANUAL;
 
     // Телеметрия
-    TelePacket telem;
+    Pkt_Tele_t telem;
+
+    pkt_rx_t rx_pkt;
 
     // Буфер UART
     uint8_t UART_RX_BUFFER[256] = {0};

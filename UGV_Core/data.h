@@ -97,31 +97,6 @@ typedef enum {
     CTRL_MODE_VPC = 2
 } ctrl_mode_t;
 
-// Структура для PID-режима (как на STM32)
-struct PCA9685 {
-    float w_cmd;       // угловая скорость (рад/с)
-    float setpoint;    // линейная скорость (м/с)
-    uint8_t stop;      // остановка/тормоз
-};
-
-// Структура для MPPI-режима (как на STM32)
-struct MPPI_Ctrl {
-    float steer_angle;   // рад
-    float throttle;      // -1..1
-    float brake;         // 0..1
-};
-
-// Структура телеметрии от STM32
-#pragma pack(push, 1)
-struct TelePacket
-{
-    uint8_t header[4];      // "TELE"
-    float w_yaw;            // угловая скорость (рад/с)
-    float stering_angle;    // угол сервы (градусы)
-    float velosity_1d_mps;  // линейная скорость (м/с)
-};
-#pragma pack(pop)
-
 typedef struct XYZ
 {
     uint16_t x = 0, y = 0, z = 0;

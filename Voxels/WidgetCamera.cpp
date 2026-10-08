@@ -25,6 +25,7 @@ void WidgetCamera::initializeSpecific()
 {
     m_Aruco_mobile->initCube(1.0f, QImage(":/Aruco/4x4_1000-47.png"));
     m_Aruco_mobile->Invisible_AllCube(true);
+    m_Aruco_mobile->setApplyMapOffset(false);
     m_CubeRander->init_fast();
 }
 

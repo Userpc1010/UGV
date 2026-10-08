@@ -760,16 +760,10 @@ __global__ void slope_to_costmap_cuda(const float* __restrict__ dev_slope, uint8
 }
 
 // Основное ядро обработки
-__global__ void processLayerKernel(uint8_t* data, int16_t layer_y, int16_t robot_height, int16_t current_y)
+__device__ void processLayerCell(uint8_t* data, int x, int z, int16_t layer_y, int16_t robot_height)
 {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int z = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= Map_X || z >= Map_Z) return;
-
-    // Проверяем слой layer_y
     if (data[get_value(x, layer_y, z)] == 0) return;
 
-    // Ищем самый верхний occupied в [layer_y, layer_y + robot_height]
     int y_top = layer_y;
     int y_max = min(layer_y + robot_height, Map_Y - 1);
     for (int yy = layer_y + 1; yy <= y_max; yy++) {
@@ -778,7 +772,6 @@ __global__ void processLayerKernel(uint8_t* data, int16_t layer_y, int16_t robot
         }
     }
 
-    // Удаляем всё выше и ниже y_top
     for (int yy = 0; yy < Map_Y; yy++) {
         if (yy != y_top) {
             data[get_value(x, yy, z)] = 0;
@@ -786,7 +779,21 @@ __global__ void processLayerKernel(uint8_t* data, int16_t layer_y, int16_t robot
     }
 }
 
+__global__ void collapseAllLayersKernel(uint8_t* data, const uint8_t* layer_order, int16_t robot_height)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int z = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= Map_X || z >= Map_Z) return;
 
+    for (int i = 0; i < Map_Y; ++i) {
+        int16_t layer_y = layer_order[i];
+
+        if (data[get_value(x, layer_y, z)] == 0) continue;
+
+        processLayerCell(data, x, z, layer_y, robot_height);
+        break;
+    }
+}
 
 // Ядро для поиска контуров в 2д карте
 __global__ void findContoursKernel_2d(uint8_t* data)
@@ -990,7 +997,7 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     int count = intrin.height * intrin.width;
     int numBlocks = count / RS2_CUDA_THREADS_PER_BLOCK;
 
-    int border_top = 200;
+    int border_top = 100;
     int border_bottom = 0;
     int border_left = 100;
     int border_right = 20;
@@ -1225,7 +1232,7 @@ void process_costmap_cuda(uint8_t *dev_voxels, uint8_t *dev_costmap,
 {
     cudaError_t result;
 
-    const float max_slope    = 3.0f;
+    const float max_slope    = 2.0f;
     const float flat_slope   = 0.1f;
     const int   inscribed_r  = 2;
     const int   inflation_r  = 4;
@@ -1279,328 +1286,26 @@ void process_costmap_cuda(uint8_t *dev_voxels, uint8_t *dev_costmap,
     compute_layer_y(layer_y, robot_y);
 
     // ========================================================================
-    // Шаг 2: Обход 100 слоёв (processLayerKernel)
+    // Шаг 2: Обход 100 слоёв — один launch, приоритет внутри ядра
     // ========================================================================
-    cudaStream_t stream;
-    cudaGraph_t graph;
-    cudaGraphExec_t graphExec;
-
-    cudaStreamCreate(&stream);
-    cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
-
-    // =========================================================================
-    // ВАЖНО: захват в цикле for не работает корректно. Нужно развернуть вручную.
-    // =========================================================================
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[0], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[1], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[2], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[3], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[4], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[5], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[6], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[7], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[8], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[9], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[10], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[11], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[12], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[13], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[14], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[15], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[16], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[17], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[18], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[19], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[20], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[21], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[22], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[23], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[24], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[25], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[26], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[27], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[28], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[29], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[30], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[31], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[32], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[33], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[34], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[35], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[36], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[37], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[38], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[39], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[40], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[41], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[42], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[43], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[44], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[45], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[46], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[47], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[48], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[49], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[50], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[51], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[52], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[53], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[54], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[55], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[56], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[57], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[58], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[59], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[60], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[61], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[62], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[63], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[64], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[65], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[66], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[67], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[68], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[69], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[70], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[71], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[72], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[73], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[74], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[75], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[76], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[77], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[78], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[79], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[80], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[81], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[82], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[83], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[84], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[85], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[86], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[87], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[88], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[89], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[90], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[91], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[92], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[93], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[94], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[95], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[96], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[97], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[98], robot_y, ROBOT_HEIGHT);
-
-
-    processLayerKernel<<<gridSize_2d, blockSize_2d, 0, stream>>>(dev_voxels_copy, layer_y[99], robot_y, ROBOT_HEIGHT);
-
-
-    cudaStreamEndCapture(stream, &graph);
-    cudaGraphInstantiate(&graphExec, graph, NULL, NULL, 0);
-    cudaGraphLaunch(graphExec, stream);
-    cudaStreamSynchronize(stream);
-    cudaGraphExecDestroy(graphExec);
-    cudaGraphDestroy(graph);
-    cudaStreamDestroy(stream);
-    //std::cout << "Costmap Stage 2 (100 layers)" << std::endl;
+    uint8_t* dev_layer_order = nullptr;
+    result = cudaMalloc(&dev_layer_order, Map_Y);
+    assert(result == cudaSuccess);
+
+    result = cudaMemcpy(dev_layer_order, layer_y, Map_Y, cudaMemcpyHostToDevice);
+    assert(result == cudaSuccess);
+
+    collapseAllLayersKernel<<<gridSize_2d, blockSize_2d>>>(dev_voxels_copy, dev_layer_order, ROBOT_HEIGHT);
+
+    result = cudaDeviceSynchronize();
+    if (result != cudaSuccess) {
+        std::cerr << "[CUDA] collapseAllLayers failed: "
+                  << cudaGetErrorString(result) << std::endl;
+    }
+    assert(result == cudaSuccess);
+
+    cudaFree(dev_layer_order);
+    dev_layer_order = nullptr;
 
     // ========================================================================
     // Шаг 3: Схлопывание 3D → heightmap

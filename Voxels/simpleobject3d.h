@@ -35,6 +35,8 @@ public:
     void setGlobalTransform(const QMatrix4x4 &gt);
     QQuaternion GetRot () {return m_Rotate;}
     QVector3D GetPosition () {return m_Translate;}
+    void setApplyMapOffset(bool v) { m_ApplyMapOffset = v; }
+    bool isApplyMapOffset() const { return m_ApplyMapOffset; }
 
 
 
@@ -49,6 +51,7 @@ private:
     QQuaternion m_Rotate;
     QVector3D m_Translate;
     float m_Scale;
+    bool m_ApplyMapOffset;
     QMatrix4x4 m_GlobalTransform;
 };
 

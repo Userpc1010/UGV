@@ -6,11 +6,19 @@ Cube::Cube()
   cube = new QImage(":/Target.png");
 
   invisible = false;
+
+  m_ApplyMapOffset = true;
 }
 
 void Cube::draw(QOpenGLShaderProgram *program, QOpenGLFunctions_4_5_Core *functions)
 {
    if(!invisible) for(auto o: m_Objects_Cube) o->draw(program, functions);
+}
+
+void Cube::setApplyMapOffset(bool v)
+{
+    m_ApplyMapOffset = v;
+    for (auto* o : m_Objects_Cube) o->setApplyMapOffset(v);
 }
 
 void Cube::initCube(float width, const QImage &img)
@@ -55,7 +63,9 @@ void Cube::initCube(float width, const QImage &img)
         indexes.append(i + 2); indexes.append(i + 1); indexes.append(i + 3);
     }
 
-    m_Objects_Cube.append(new SimpleObject3D(vertexes, indexes, img));
+    auto* obj = new SimpleObject3D(vertexes, indexes, img);
+    obj->setApplyMapOffset(m_ApplyMapOffset);
+    m_Objects_Cube.append(obj);
 }
 
 void Cube::add_cube(QVector3D pos)

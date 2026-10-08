@@ -57,6 +57,7 @@ void DrawLine::draw(QOpenGLShaderProgram *program, QOpenGLFunctions_4_5_Core *fu
 
     program->setUniformValue("r_id", 2);
     program->setUniformValue("p_id", 2);
+    program->setUniformValue("u_apply_map_offset", 1);
     program->setUniformValue("u_color", color);
 
     m_VertexBuffer.bind();

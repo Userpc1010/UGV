@@ -50,8 +50,12 @@ void CostmapRander::draw(QOpenGLShaderProgram *program, QOpenGLFunctions_4_5_Cor
 {
     if(!m_VertexBuffer.isCreated() || !m_IndexBuffer.isCreated() || !m_Texture || !m_Texture->isCreated()) return;
 
+//    QMatrix4x4 modelMatrix;
+//    modelMatrix.setToIdentity();
+//    program->setUniformValue("u_modelMatrix", modelMatrix);
     program->setUniformValue("r_id", 0);
     program->setUniformValue("p_id", 0);
+    program->setUniformValue("u_apply_map_offset", 0);
     m_Texture->bind(0);
     program->setUniformValue("u_texture", 0);
 

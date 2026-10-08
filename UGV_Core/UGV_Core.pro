@@ -27,6 +27,7 @@ HEADERS += \
     CostmapColorizer.h \
     data.h \
     myserver.h \
+    protocol.h \
     quadbike_controller.h \
     statelattice.h \
     utilitiy/tools.h \

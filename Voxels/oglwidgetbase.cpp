@@ -42,6 +42,7 @@ void OGLWidgetBase::initializeGL()
     {
         m_Rover->translate(init_pos);
         m_Rover->scale(m_RoverScale);
+        m_Rover->setApplyMapOffset(false);
     }
 
     // Вызов специфичной инициализации наследника

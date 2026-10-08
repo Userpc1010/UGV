@@ -140,6 +140,8 @@ MainWindow::MainWindow(QWidget *parent) :
 
     connect(Server, SIGNAL(Server_to_Controller(QByteArray)),                                                                                    controller, SLOT(Server_to_Controller(QByteArray)));
 
+    connect(controller, SIGNAL(Controller_to_Server(QByteArray)),                                                                                Server, SLOT(Controller_to_Server(QByteArray)));
+
     connect(this, SIGNAL(WindowState(uint8_t)),                                                                                                  processor, SLOT(WindowState(uint8_t)));
 
     connect(this, SIGNAL(WindowState(uint8_t)),                                                                                                  processor->state_lattice_, SLOT(WindowState(uint8_t)));
@@ -148,28 +150,6 @@ MainWindow::MainWindow(QWidget *parent) :
 
     connect(this, SIGNAL(WindowState(uint8_t)),                                                                                                  &SDK->Node, SLOT(WindowState(uint8_t)));
 
-
-//  connect (Server, SIGNAL(Server_to_GPS(QByteArray)),                                                  gps, SLOT(Server_to_GPS(QByteArray)));
-
-//  connect (gps, SIGNAL(GPS_to_Server(QByteArray)),                                                     Server, SLOT(GPS_to_Server(QByteArray)));
-
-//  connect (gsm, SIGNAL(GSM_to_Server(QByteArray)),                                                     Server, SLOT(GSM_to_Server(QByteArray)));
-
-//  connect (gsm, SIGNAL(GSM_to_GPS()),                                                                  gps, SLOT(GSM_to_GPS()));
-
-//  connect (gps, SIGNAL(GPS_to_GSM(double, double)),                                                    gsm, SLOT(GPS_to_GSM(double, double)));
-
-//  connect (Server, SIGNAL(Server_to_I2C(QByteArray)),                                                  I2C, SLOT(Server_to_I2C(QByteArray)));
-
-//  connect (I2C, SIGNAL(I2C_to_Server(QByteArray)),                                                     Server, SLOT(I2C_to_Server(QByteArray)));
-
-//  connect (gps, SIGNAL(GPS_to_I2C(QByteArray)),                                                        I2C, SLOT(GPS_to_I2C(QByteArray)));
-
-//  connect (gps, SIGNAL(GPS_to_SLAM(QByteArray)),                                                       widget, SLOT(I2C_to_SLAM(QByteArray)));
-
-//  connect (I2C, SIGNAL(I2C_to_GPS(QByteArray)),                                                        gps, SLOT(I2C_to_GPS(QByteArray)));
-
-//  connect (Lidar, SIGNAL(Lidar_to_I2C(int)),                                                           I2C, SLOT(Lidar_to_I2C(int)));
 
 }
 

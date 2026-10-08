@@ -19,11 +19,14 @@ public:
     void translation(QVector3D pos);
     void Invisible_AllCube (bool invisible_);
     void Offset_AllCube (QVector3D pos);
+    void setApplyMapOffset(bool v);
     void delete_cube ();
 
 private:
 
 bool invisible;
+
+bool m_ApplyMapOffset;
 
 QImage* cube;
 

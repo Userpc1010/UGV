@@ -10,6 +10,7 @@ SimpleObject3D::SimpleObject3D()
       m_Texture(nullptr)
 {
  m_Scale = 1.0f;
+ m_ApplyMapOffset = true;
 }
 
 SimpleObject3D::SimpleObject3D(const QVector<VertexData> &vert, const QVector<GLuint> &ind, const QImage &img)
@@ -67,6 +68,7 @@ void SimpleObject3D::draw(QOpenGLShaderProgram *program, QOpenGLFunctions_4_5_Co
 
     program->setUniformValue("r_id", 0);
     program->setUniformValue("p_id", 0);
+    program->setUniformValue("u_apply_map_offset", m_ApplyMapOffset ? 1 : 0);
     m_Texture->bind(0);
     program->setUniformValue("u_texture", 0);
     program->setUniformValue("u_modelMatrix", modelMatrix);

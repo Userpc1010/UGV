@@ -14,7 +14,8 @@ attribute float a_position_vector;
 attribute float a_color_position;
 
 uniform int p_id;
-uniform vec3 u_map_offset;  // Новый uniform для смещения карты
+uniform int u_apply_map_offset;
+uniform vec3 u_map_offset;
 
 varying highp vec4 v_position;
 varying highp vec2 v_textcoord;
@@ -43,12 +44,18 @@ vec3 unpack_position(float packed_float) {
     return position_vector;
 }
 
+vec3 effective_map_offset() {
+    return (u_apply_map_offset == 1) ? u_map_offset : vec3(0.0, 0.0, 0.0);
+}
+
 void main(void)
 {
+    vec3 map_off = effective_map_offset();
+
     if(p_id == 3) {
 
         vec4 worldPos = u_modelMatrix * a_position;
-        worldPos.xyz += u_map_offset;  // Применяем смещение
+        worldPos.xyz += map_off;
         gl_Position = u_projectionMatrix * u_viewMatrix * worldPos;
         v_color = color_position;
     }
@@ -56,7 +63,7 @@ void main(void)
     if(p_id == 2) {
 
         vec4 worldPos = u_modelMatrix * a_position;
-        worldPos.xyz += u_map_offset;  // Применяем смещение
+        worldPos.xyz += map_off;
         gl_Position = u_projectionMatrix * u_viewMatrix * worldPos;
     }
 
@@ -104,7 +111,7 @@ void main(void)
     if (p_id == 0) {
 
         vec4 worldPos = u_modelMatrix * a_position;
-        worldPos.xyz += u_map_offset;  // Применяем смещение
+        worldPos.xyz += map_off;
         gl_Position = u_projectionMatrix * u_viewMatrix * worldPos;
         v_textcoord = a_textcoord;
     }

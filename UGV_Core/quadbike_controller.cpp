@@ -44,17 +44,16 @@ static int get_baud(int baud)
     default: return -1;
     }
 }
-
 // ========== КОНСТРУКТОР ==========
 
 quadbike_controller::quadbike_controller(QObject *parent)
     : QObject(parent)
 {
     // Инициализация UART
-//    fd4 = init_comport("/dev/ttyUSB0", 2000000);
-//    if (fd4 < 0) {
-//        qWarning() << "Failed to open UART port";
-//    }
+    fd4 = init_comport("/dev/ttyUSB0", 2000000);
+    if (fd4 < 0) {
+        qWarning() << "Failed to open UART port";
+    }
 
     // Инициализация структур
     pca.w_cmd = 0.0f;
@@ -93,10 +92,12 @@ quadbike_controller::quadbike_controller(QObject *parent)
         qWarning() << "[quadbike_controller] MPPI initialization failed";
     }
 
-    // Таймер UART (200 Гц = 5 мс)
-//    timer_uart = new QTimer(this);
-//    connect(timer_uart, &QTimer::timeout, this, &quadbike_controller::UART4_timer);
-//    timer_uart->start(5);
+    pkt_rx_init(&rx_pkt);
+
+    // Таймер UART (100 Гц = 10 мс)
+    timer_uart = new QTimer(this);
+    connect(timer_uart, &QTimer::timeout, this, &quadbike_controller::UART4_timer);
+    timer_uart->start(10);
 
     // Сразу отправляем режим MANUAL
     sendMode(CTRL_MODE_MANUAL);
@@ -249,7 +250,7 @@ void quadbike_controller::Server_to_Controller(QByteArray data)
                 sendMode(CTRL_MODE_MANUAL);
             }
 
-            qDebug() << "MAN: v =" << v_cmd << "w =" << w_cmd;
+            //qDebug() << "MAN: v =" << v_cmd << "w =" << w_cmd;
         }
         return;
     }
@@ -259,43 +260,54 @@ void quadbike_controller::Server_to_Controller(QByteArray data)
 
 void quadbike_controller::UART4_timer()
 {
-        if (fd4 < 0) return;
+    if (fd4 < 0) return;
 
-        // Heartbeat + отправка в зависимости от режима
-        if (current_mode == CTRL_MODE_MANUAL) {
-            sendPCA();
-        } else if (current_mode == CTRL_MODE_MPPI) {
-            sendMPPI();
-        } else if (current_mode == CTRL_MODE_VPC) {
-            sendPCA();  // VPC использует PCA, потому что STM32 в MANUAL режиме
-        }
+    // --- TX ---
+    if (current_mode == CTRL_MODE_MANUAL) {
+        sendPCA();
+    } else if (current_mode == CTRL_MODE_MPPI) {
+        sendMPPI();
+    } else if (current_mode == CTRL_MODE_VPC) {
+        sendPCA();
+    }
 
-    // Приём телеметрии
+    // --- RX ---
     int avail = serialDataAvail(fd4);
     if (avail <= 0) return;
 
-    int len = read_com(fd4, sizeof(UART_RX_BUFFER), 10, UART_RX_BUFFER);
+    uint8_t tmp[256];
+    int len = read_com(fd4, sizeof(tmp), 1, tmp);
+    if (len <= 0) return;
 
-    if (len >= (int)sizeof(TelePacket))
-    {
-        if (UART_RX_BUFFER[0] == 'T' && UART_RX_BUFFER[1] == 'E' &&
-            UART_RX_BUFFER[2] == 'L' && UART_RX_BUFFER[3] == 'E')
-        {
-            TelePacket tele_packet;
-            memcpy(&tele_packet, UART_RX_BUFFER, sizeof(TelePacket));
+    for (int i = 0; i < len; i++) {
+        if (pkt_rx_feed(&rx_pkt, tmp[i])) {
+            switch (rx_pkt.cmd) {
+                case PKT_CMD_TELE: {
+                    if (rx_pkt.len == sizeof(Pkt_Tele_t)) {
+                        Pkt_Tele_t *p = (Pkt_Tele_t*)rx_pkt.payload;
+                        telem.stering_angle = p->stering_angle;
+                        telem.velosity_1d_mps = p->velosity_1d_mps;
 
-            telem = tele_packet;
+                        QByteArray telData;
+                        telData.append("TEL");
+                        telData.append((const char*)&p->velosity_1d_mps, 4);
+                        telData.append((const char*)&p->stering_angle, 4);
+                        emit Controller_to_Server(telData);
+                    }
+                    break;
+                }
+                case PKT_CMD_MODE_ACK:
+                    if (rx_pkt.len >= 1)
+                        qDebug() << "[UART4] MODE_ACK:" << rx_pkt.payload[0];
+                    break;
 
-            QByteArray telData;
-            telData.append("TEL");
-            telData.append(reinterpret_cast<const char*>(&tele_packet.velosity_1d_mps), sizeof(float));
-            telData.append(reinterpret_cast<const char*>(&tele_packet.w_yaw), sizeof(float));
-
-            emit Controller_to_Server(telData);
+                case PKT_CMD_PONG:
+                    qDebug() << "[UART4] PONG";
+                    break;
+            }
         }
     }
 }
-
 
 // ========== СЛОТЫ ==========
 
@@ -415,47 +427,44 @@ void quadbike_controller::setGoal(float x, float y, float yaw)
 
 // ========== UART FUNCTIONS ==========
 
+#include "protocol.h"
+
 void quadbike_controller::sendMode(ctrl_mode_t mode)
 {
     if (fd4 < 0) return;
 
-    uint8_t buffer[5];
-    buffer[0] = 'M';
-    buffer[1] = 'O';
-    buffer[2] = 'D';
-    buffer[3] = 'E';
-    buffer[4] = (uint8_t)mode;
-
-    write_com(fd4, buffer, 5, 100);
-    qDebug() << "MODE sent:" << (int)mode;
+    uint8_t m = (uint8_t)mode;
+    uint8_t buf[16];
+    uint16_t n = pkt_build(buf, PKT_CMD_MODE, &m, 1);
+    write_com(fd4, buf, n, 100);
 }
 
 void quadbike_controller::sendPCA()
 {
     if (fd4 < 0) return;
 
-    uint8_t buffer[3 + sizeof(PCA9685)];
-    buffer[0] = 'P';
-    buffer[1] = 'C';
-    buffer[2] = 'A';
+    Pkt_PCA_t p;
+    p.w_cmd    = pca.w_cmd;
+    p.setpoint = pca.setpoint;
+    p.stop     = pca.stop;
 
-    memcpy(buffer + 3, &pca, sizeof(PCA9685));
-
-    write_com(fd4, buffer, sizeof(buffer), 100);
+    uint8_t buf[32];
+    uint16_t n = pkt_build(buf, PKT_CMD_PCA, &p, sizeof(p));
+    write_com(fd4, buf, n, 100);
 }
 
 void quadbike_controller::sendMPPI()
 {
     if (fd4 < 0) return;
 
-    uint8_t buffer[3 + sizeof(MPPI_Ctrl)];
-    buffer[0] = 'M';
-    buffer[1] = 'P';
-    buffer[2] = 'I';
+    Pkt_MPI_t p;
+    p.steer_angle = mppi_ctrl.steer_angle;
+    p.throttle    = mppi_ctrl.throttle;
+    p.brake       = mppi_ctrl.brake;
 
-    memcpy(buffer + 3, &mppi_ctrl, sizeof(MPPI_Ctrl));
-
-    write_com(fd4, buffer, sizeof(buffer), 100);
+    uint8_t buf[32];
+    uint16_t n = pkt_build(buf, PKT_CMD_MPI, &p, sizeof(p));
+    write_com(fd4, buf, n, 100);
 }
 
 /**
@@ -512,7 +521,12 @@ int quadbike_controller::init_comport(const char *comport, int baud)
     options.c_lflag &= ~ECHOE;
     options.c_lflag &= ~ECHOK;
 
-    tcsetattr(fd, TCSANOW, &options);
+    if (tcsetattr(fd, TCSANOW, &options) != 0) {
+        fprintf(stderr, "tcsetattr failed: %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
+    tcflush(fd, TCIOFLUSH);
 
     return fd;
 }

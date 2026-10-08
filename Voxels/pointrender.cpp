@@ -31,6 +31,7 @@ void PointRender::draw(QOpenGLShaderProgram *program, QOpenGLFunctions_4_5_Core 
 
     program->setUniformValue("r_id", 3);
     program->setUniformValue("p_id", 3);
+    program->setUniformValue("u_apply_map_offset", 0);
 
     GLbyte atribloc = program->attributeLocation("color_position");
 

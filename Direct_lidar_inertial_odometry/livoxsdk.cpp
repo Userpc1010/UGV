@@ -19,6 +19,8 @@ LivoxSDK::LivoxSDK(const std::string config_path, QObject *parent)
 
   path = config_path;
 
+  DisableLivoxSdkConsoleLogger();
+
   // REQUIRED, to init Livox SDK2
   if (!LivoxLidarSdkInit(path.c_str())) {
         printf("Livox Init Failed\n");

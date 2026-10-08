@@ -91,6 +91,7 @@ void CubeRander::draw(QOpenGLShaderProgram *program, QOpenGLFunctions_4_5_Core *
 
     program->setUniformValue("r_id", 1);
     program->setUniformValue("p_id", 1);
+    program->setUniformValue("u_apply_map_offset", 0);
     program->setUniformValue("u_lightPosition", camera);
     program->setUniformValue("u_lightPower", 1.0f);
 
