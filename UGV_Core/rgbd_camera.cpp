@@ -6,13 +6,16 @@
 #include <time.h>
 
 extern "C"
-void init_cuda_map(uint8_t **dev_voxels, uint8_t **dev_costmap);
+int init_frustum_cuda(const rs2_intrinsics &intrin);
 
 extern "C"
-void cleanup_cuda_map(uint8_t *dev_voxels, uint8_t *dev_costmap);
+void init_cuda_map(uint16_t **dev_voxels, uint8_t **dev_costmap);
 
 extern "C"
-void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter, uint8_t *dev_voxels,
+void cleanup_cuda_map(uint16_t *dev_voxels, uint8_t *dev_costmap);
+
+extern "C"
+void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter, uint16_t *dev_voxels, uint32_t total_voxels_frustum,
                           const rs2_intrinsics &intrin, const uint16_t *depth, float depth_scale,
                           double w, double x, double y, double z,
                           int16_t x_, int16_t y_, int16_t z_,
@@ -20,7 +23,7 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
                           const int16_t  *lidar_pcl,    uint32_t lidar_size);
 
 extern "C"
-void process_costmap_cuda(uint8_t *dev_voxels, uint8_t *dev_costmap, uint8_t *costmap_host, int16_t current_y);
+void process_costmap_cuda(uint16_t *dev_voxels, uint8_t *dev_costmap, uint8_t *costmap_host);
 
 
 uint32_t floatBitsToUint_memcpy(float f) {
@@ -364,16 +367,14 @@ void Processor::point_cloud_lidar(const uint16_t * keyframe_pcl, uint32_t size_k
 
         // === CUDA: депроекция + вокселизация (камера + лидар) + сдвиг ===
         deproject_depth_cuda(&serialization_point, &world_counter,
-                             dev_voxels,
+                             dev_voxels, total_voxels_frustum,
                              intrinsics_depth, depth_data, depth_scale,
                              odom.w, -odom.y, -odom.z, odom.x,
                              delta_cells_x, -delta_cells_y, -delta_cells_z,
                              keyframe_pcl, size_keyframe,
                              lidar_pcl, size_pcl);
 
-        // === Costmap ===
-        int16_t current_y = 44;  // TODO: высота робота над землёй
-        process_costmap_cuda(dev_voxels, dev_costmap, costmap, current_y);
+        process_costmap_cuda(dev_voxels, dev_costmap, costmap);
 
         // === Формирование массивов для визуализатора ===
         vertices_data = new GLfloat[world_counter]; ptr_guard_vertices_data = true;
@@ -921,7 +922,9 @@ void Processor::run()
 
    init_cuda_map(&dev_voxels, &dev_costmap);
 
-   costmap = new uint8_t [1600000];   // CPU-копия costmap (остаётся)
+   total_voxels_frustum = init_frustum_cuda(intrinsics_depth);
+
+   costmap = new uint8_t [160000];   // CPU-копия costmap (остаётся)
 
    cv::Mat Color;
 

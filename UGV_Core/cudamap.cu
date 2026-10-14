@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <memory.h>
 #include <iostream>
+#include <iomanip>
 #include <librealsense2/rs.h>
 #include <librealsense2/rsutil.h>
 #include "assert.h"
@@ -16,8 +17,26 @@
 #define Map_center_Y 49
 #define Map_center_Z 199
 #define Map_scale 10.0f
-#define DEFAULT_ROBOT_Y 44
+#define DEFAULT_ROBOT_Y 45
 #define ROBOT_HEIGHT 5
+
+// ============================================================================
+// Frustum binning parameters
+// ============================================================================
+#define FRUSTUM_MAX_LAYERS 256
+
+static const float CAM_NEAR_MM      = 500.0f;
+static const float CAM_FAR_MM       = 5000.0f;
+static const float FRUSTUM_VOXEL_MM = 100.0f;
+
+__constant__ int   c_Nz;
+__constant__ int   c_Nx_per_layer[FRUSTUM_MAX_LAYERS];
+__constant__ int   c_Ny_per_layer[FRUSTUM_MAX_LAYERS];
+__constant__ int   c_layer_offset[FRUSTUM_MAX_LAYERS];
+__constant__ float c_tan_half_h;
+__constant__ float c_tan_half_v;
+__constant__ float c_cam_near_mm;
+__constant__ float c_cam_far_mm;
 
 __device__ float Rotation_matrix[9] = {0.999048f, 0.018916f, -0.0393044f, 0.0f, 0.901077f, -0.433659f, 0.0436194f, 0.433246f, 0.900219f};
 __device__ float Translation[3] = {-0.065f, 0.089f, 0.055f};
@@ -91,6 +110,17 @@ __device__  uint32_t get_value (const uint16_t x, const uint16_t y, const uint16
 __device__  uint32_t get_value_2d (const uint16_t x, const uint16_t y) {
     uint32_t index = y * 400 + x;
     return index;
+}
+
+__device__ __forceinline__
+uint32_t get_value_frustum(const uint16_t iz,
+                           const uint16_t iy,
+                           const uint16_t ix)
+{
+    uint32_t voxel_idx = (uint32_t)c_layer_offset[iz]
+                       + (uint32_t)iy * (uint32_t)c_Nx_per_layer[iz]
+                       + (uint32_t)ix;
+    return voxel_idx * 3;
 }
 
 __device__
@@ -201,65 +231,172 @@ void deproject_pixel_to_point_cuda(float points[3], const struct rs2_intrinsics 
 
 
 __global__
-void kernel_deproject_depth_cuda(uint16_t *ray_points, const rs2_intrinsics* intrin, const uint16_t * depth, float depth_scale, double w, double x, double y, double z)
+void kernel_deproject_depth_cuda(int16_t *ray_points_cam,
+                                 const rs2_intrinsics* intrin,
+                                 const uint16_t * depth,
+                                 float depth_scale)
 {
     int i = blockDim.x * blockIdx.x + threadIdx.x;
-
-    if (i >= (*intrin).height * (*intrin).width) {
-        return;
-    }
-
+    if (i >= (*intrin).height * (*intrin).width) return;
     int stride = blockDim.x * gridDim.x;
-    int a, b;
-
-    const float ww = w * w;
-    const float xx = x * x;
-    const float yy = y * y;
-    const float zz = z * z;
-    const float wx = w * x;
-    const float wy = w * y;
-    const float wz = w * z;
-    const float xy = x * y;
-    const float xz = x * z;
-    const float yz = y * z;
-    const float two = 2.0f;
 
     for (int j = i; j < (*intrin).height * (*intrin).width; j += stride) {
-        b = j / (*intrin).width;
-        a = j - b * (*intrin).width;
+        int b = j / (*intrin).width;
+        int a = j - b * (*intrin).width;
         const float pixel[] = { (float)a, (float)b };
 
-        float point[3] = {0}; float point_s[3] = {0}; uint16_t points[3] = {0};
-
+        float point[3] = {0};
         deproject_pixel_to_point_cuda(point, intrin, pixel, depth_scale * depth[j]);
 
-        point_s[0] = (Rotation_matrix[0] * point[0] + Rotation_matrix[3] * point[1] + Rotation_matrix[6] * point[2]);
-        point_s[1] = (Rotation_matrix[1] * point[0] + Rotation_matrix[4] * point[1] + Rotation_matrix[7] * point[2]);
-        point_s[2] = (Rotation_matrix[2] * point[0] + Rotation_matrix[5] * point[1] + Rotation_matrix[8] * point[2]);
+        float xf = point[0] * 1000.0f;
+        float yf = point[1] * 1000.0f;
+        float zf = point[2] * 1000.0f;
 
-        point_s[0] += Translation[0];
-        point_s[1] += Translation[1];
-        point_s[2] += Translation[2];
+        if (zf < c_cam_near_mm || zf >= c_cam_far_mm) continue;
 
-        point_s[0] *= Map_scale;
-        point_s[1] *= Map_scale;
-        point_s[2] *= Map_scale;
+        int iz = (int)((zf - c_cam_near_mm) / FRUSTUM_VOXEL_MM);
+        if (iz < 0 || iz >= c_Nz) continue;
 
-        points[0] = __float2int_rd(ww*point_s[0] + two*wy*point_s[2] - two*wz*point_s[1] + xx*point_s[0] + two*xy*point_s[1] + two*xz*point_s[2] - zz*point_s[0] - yy*point_s[0]) + Map_center_X;
-        points[1] = __float2int_rd(two*xy*point_s[0] + yy*point_s[1] + two*yz*point_s[2] + two*wz*point_s[0] - zz*point_s[1] + ww*point_s[1] - two*wx*point_s[2] - xx*point_s[1]) + Map_center_Y;
-        points[2] = __float2int_rd(two*xz*point_s[0] + two*yz*point_s[1] + zz*point_s[2] - two*wy*point_s[0] - yy*point_s[2] + two*wx*point_s[1] - xx*point_s[2] + ww*point_s[2]) + Map_center_Z;
+        float z_center = c_cam_near_mm + iz * FRUSTUM_VOXEL_MM + FRUSTUM_VOXEL_MM * 0.5f;
+        float half_x = z_center * c_tan_half_h;
+        float half_y = z_center * c_tan_half_v;
 
-        if((points[0] < Map_X) && (points[1] < Map_Y) && (points[2] < Map_Z) && (points[0] > 0) && (points[1] > 0) && (points[2] > 0)) {
-            ray_points[j * 3] = points[0];
-            ray_points[1 + j * 3] = points[1];
-            ray_points[2 + j * 3] = points[2];
+        if (xf < -half_x || xf >= half_x) continue;
+        if (yf < -half_y || yf >= half_y) continue;
+
+        int Nx = c_Nx_per_layer[iz];
+        int Ny = c_Ny_per_layer[iz];
+
+        int ix = (int)((xf + half_x) / FRUSTUM_VOXEL_MM);
+        int iy = (int)((yf + half_y) / FRUSTUM_VOXEL_MM);
+        if (ix < 0 || ix >= Nx) continue;
+        if (iy < 0 || iy >= Ny) continue;
+
+        int16_t x_mm = (int16_t)xf;
+        int16_t y_mm = (int16_t)yf;
+        int16_t z_mm = (int16_t)zf;
+
+        uint32_t base = get_value_frustum((uint16_t)iz, (uint16_t)iy, (uint16_t)ix);
+        int16_t *p = &ray_points_cam[base];
+
+        if (p[2] == 0) {
+
+            p[0] = x_mm;
+            p[1] = y_mm;
+            p[2] = z_mm;
+
+        } else {
+            float cx = -half_x + (ix + 0.5f) * FRUSTUM_VOXEL_MM;
+            float cy = -half_y + (iy + 0.5f) * FRUSTUM_VOXEL_MM;
+            float cz = z_center;
+
+            float dxn = xf - cx, dyn = yf - cy, dzn = zf - cz;
+            float d_new = dxn*dxn + dyn*dyn + dzn*dzn;
+
+            float dxo = (float)p[0] - cx;
+            float dyo = (float)p[1] - cy;
+            float dzo = (float)p[2] - cz;
+            float d_old = dxo*dxo + dyo*dyo + dzo*dzo;
+
+            if (d_new < d_old) {
+
+                p[0] = x_mm;
+                p[1] = y_mm;
+                p[2] = z_mm;
+            }
         }
-        else {
-            ray_points[j * 3] = 0;
-            ray_points[1 + j * 3] = 0;
-            ray_points[2 + j * 3] = 0;
+    }
+}
+
+
+__global__
+void rotate_ray_points_to_world(const int16_t *ray_points_cam,
+                                uint16_t *ray_points_world,
+                                const unsigned int counter,
+                                double w, double x, double y, double z)
+{
+    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (i >= counter) return;
+    int stride = blockDim.x * gridDim.x;
+
+    const float ww=w*w, xx=x*x, yy=y*y, zz=z*z;
+    const float wx=w*x, wy=w*y, wz=w*z;
+    const float xy=x*y, xz=x*z, yz=y*z;
+    const float two = 2.0f;
+
+    for (int j = i; j < counter; j += stride) {
+        int16_t cx = ray_points_cam[j*3];
+        int16_t cy = ray_points_cam[1 + j*3];
+        int16_t cz = ray_points_cam[2 + j*3];
+
+        if (cz == 0) {
+            ray_points_world[j*3]     = 0;
+            ray_points_world[1 + j*3] = 0;
+            ray_points_world[2 + j*3] = 0;
+            continue;
         }
-   }
+
+        // мм → м
+        float px = cx * 0.001f;
+        float py = cy * 0.001f;
+        float pz = cz * 0.001f;
+
+        // ================================================================
+        // 1. Калибровка камеры (Rotation_matrix)
+        // ================================================================
+        float ps0 = Rotation_matrix[0]*px + Rotation_matrix[3]*py + Rotation_matrix[6]*pz;
+        float ps1 = Rotation_matrix[1]*px + Rotation_matrix[4]*py + Rotation_matrix[7]*pz;
+        float ps2 = Rotation_matrix[2]*px + Rotation_matrix[5]*py + Rotation_matrix[8]*pz;
+
+        // ================================================================
+        // 2. Offset камеры (Translation)
+        // ================================================================
+        ps0 += Translation[0];
+        ps1 += Translation[1];
+        ps2 += Translation[2];
+
+        // ================================================================
+        // 3. Масштаб
+        // ================================================================
+        ps0 *= Map_scale;
+        ps1 *= Map_scale;
+        ps2 *= Map_scale;
+
+        // ================================================================
+        // 4. Поворот кватернионом (ориентация робота в мире)
+        // ================================================================
+        float rs0 = ww*ps0 + two*wy*ps2 - two*wz*ps1 + xx*ps0 + two*xy*ps1 + two*xz*ps2 - zz*ps0 - yy*ps0;
+        float rs1 = two*xy*ps0 + yy*ps1 + two*yz*ps2 + two*wz*ps0 - zz*ps1 + ww*ps1 - two*wx*ps2 - xx*ps1;
+        float rs2 = two*xz*ps0 + two*yz*ps1 + zz*ps2 - two*wy*ps0 - yy*ps2 + two*wx*ps1 - xx*ps2 + ww*ps2;
+
+        // ================================================================
+        // 5. В индексы карты
+        // ================================================================
+        int imx = __float2int_rd(rs0 + Map_center_X);
+        int imy = __float2int_rd(rs1 + Map_center_Y);
+        int imz = __float2int_rd(rs2 + Map_center_Z);
+
+        if (imx <= 0 || imx >= Map_X ||
+            imy <= 0 || imy >= Map_Y ||
+            imz <= 0 || imz >= Map_Z) {
+            ray_points_world[j*3]     = 0;
+            ray_points_world[1 + j*3] = 0;
+            ray_points_world[2 + j*3] = 0;
+            continue;
+        }
+
+        // ================================================================
+        // 6. Y-высота в мировых мм
+        // ================================================================
+        float y_world_mm_f = (rs1 + (float)Map_center_Y) * 100.0f;
+        int y_world_mm = __float2int_rd(y_world_mm_f);
+        if (y_world_mm < 0) y_world_mm = 0;
+        if (y_world_mm > Map_Y * 100 - 1) y_world_mm = Map_Y * 100 - 1;
+
+        ray_points_world[j*3]     = (uint16_t)imx;
+        ray_points_world[1 + j*3] = (uint16_t)(y_world_mm + 1);
+        ray_points_world[2 + j*3] = (uint16_t)imz;
+    }
 }
 
 __device__ int16_t signum(int16_t x) {
@@ -282,7 +419,7 @@ __device__ float intbound(float s, float ds) {
 }
 
 __device__
-void Raycast_2_cuda(uint8_t * voxels, const uint16_t start[3], const uint16_t end[3], const uint16_t min[3], const uint16_t max[3])
+void Raycast_2_cuda(uint16_t * voxels, const uint16_t start[3], const uint16_t end[3], const uint16_t min[3], const uint16_t max[3])
 {
   //    std::cout << start << ' ' << end << std::endl;
   // From "A Fast Voxel Traversal Algorithm for Ray Tracing"
@@ -403,47 +540,48 @@ void Raycast_2_cuda(uint8_t * voxels, const uint16_t start[3], const uint16_t en
   }
 }
 
-
 __global__
-void voxelization_cuda( uint8_t * voxels, const uint16_t * ray_points, const unsigned int counter)
+void voxelization_cuda(uint16_t *voxels,
+                       const uint16_t *ray_points_world,
+                       const unsigned int counter)
 {
     int i = blockDim.x * blockIdx.x + threadIdx.x;
-
-    if (i >= counter) {
-        return;
-    }
-
+    if (i >= counter) return;
     int stride = blockDim.x * gridDim.x;
 
     for (int j = i; j < counter; j += stride) {
+        uint16_t imx   = ray_points_world[j*3];
+        uint16_t y_mm1 = ray_points_world[1 + j*3];
+        uint16_t imz   = ray_points_world[2 + j*3];
+        if (y_mm1 == 0) continue;
 
-        if((ray_points[j * 3] > 0) && (ray_points[1 + j * 3] > 0) && (ray_points[2 + j * 3] > 0)) {
-
-            voxels[get_value(ray_points[j * 3], ray_points[1 + j * 3], ray_points[2 + j * 3])] = 1;
-        }
+        uint16_t iy = (uint16_t)((y_mm1 - 1) / 100);
+        uint32_t idx = get_value(imx, iy, imz);
+        voxels[idx] = y_mm1;
     }
 }
 
 __global__
-void ray_casting_map (uint8_t * voxels, const uint16_t *ray_points, const unsigned int counter)
+void ray_casting_map(uint16_t *voxels,
+                     const uint16_t *ray_points_world,
+                     const unsigned int counter)
 {
     int i = blockDim.x * blockIdx.x + threadIdx.x;
-
-    if (i >= counter) {
-        return;
-    }
-
+    if (i >= counter) return;
     int stride = blockDim.x * gridDim.x;
 
     for (int j = i; j < counter; j += stride) {
+        uint16_t imx   = ray_points_world[j*3];
+        uint16_t y_mm1 = ray_points_world[1 + j*3];
+        uint16_t imz   = ray_points_world[2 + j*3];
+        if (y_mm1 == 0) continue;
 
-        if((ray_points[j * 3] > 0) && (ray_points[1 + j * 3] > 0) && (ray_points[2 + j * 3] > 0)) {
+        uint16_t end[3]   = { imx, (uint16_t)((y_mm1 - 1) / 100), imz };
+        uint16_t start[3] = { Map_center_X, Map_center_Y, Map_center_Z };
+        uint16_t minv[3]  = { 0, 0, 0 };
+        uint16_t maxv[3]  = { Map_X, Map_Y, Map_Z };
 
-        uint16_t start[3] = {Map_center_X,Map_center_Y,Map_center_Z};  uint16_t end[3] = {ray_points[j * 3], ray_points[j * 3 + 1], ray_points[j * 3 + 2]}; uint16_t min[3] = {0,0,0}; uint16_t max[3] = {Map_X,Map_Y,Map_Z};
-
-        Raycast_2_cuda(voxels, start, end, min, max);
-
-        }
+        Raycast_2_cuda(voxels, start, end, minv, maxv);
     }
 }
 
@@ -451,7 +589,7 @@ void ray_casting_map (uint8_t * voxels, const uint16_t *ray_points, const unsign
 // Вокселизация точек лидара (int16_t*, координаты в системе карты)
 // ============================================================================
 __global__
-void voxelization_cuda_lidar(uint8_t *voxels, const int16_t *lidar_pcl, const uint32_t counter)
+void voxelization_cuda_lidar(uint16_t *voxels, const int16_t *lidar_pcl, const uint32_t counter)
 {
     int i = blockDim.x * blockIdx.x + threadIdx.x;
     if (i >= counter) return;
@@ -463,7 +601,9 @@ void voxelization_cuda_lidar(uint8_t *voxels, const int16_t *lidar_pcl, const ui
         int16_t z = lidar_pcl[j * 3 + 2];
 
         if (x > 0 && x < Map_X && y > 0 && y < Map_Y && z > 0 && z < Map_Z) {
-            voxels[get_value((uint16_t)x, (uint16_t)y, (uint16_t)z)] = 1;
+            uint32_t idx = get_value((uint16_t)x, (uint16_t)y, (uint16_t)z);
+            uint16_t new_v = (uint16_t)(y * 100 + 50 + 1);
+            if (voxels[idx] == 0) voxels[idx] = new_v;
         }
     }
 }
@@ -472,7 +612,7 @@ void voxelization_cuda_lidar(uint8_t *voxels, const int16_t *lidar_pcl, const ui
 // Ray casting для точек лидара (int16_t*, локальные координаты)
 // ============================================================================
 __global__
-void ray_casting_map_lidar(uint8_t * voxels, const int16_t *lidar_pcl, const uint32_t counter)
+void ray_casting_map_lidar(uint16_t * voxels, const int16_t *lidar_pcl, const uint32_t counter)
 {
     int i = blockDim.x * blockIdx.x + threadIdx.x;
     if (i >= counter) return;
@@ -506,14 +646,14 @@ void ray_casting_map_lidar(uint8_t * voxels, const int16_t *lidar_pcl, const uin
 // ============================================================================
 
 // Блочная редукция для подсчёта занятых вокселей. Не обнуляет вход.
-__global__ void count_map_size_2(uint8_t *voxels, uint32_t* d_result, uint32_t size)
+__global__ void count_map_size_2(uint16_t *voxels, uint32_t* d_result, uint32_t size)
 {
     __shared__ int s_data[RS2_CUDA_THREADS_PER_BLOCK];
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int tid = threadIdx.x;
 
-    s_data[tid] = (idx < size) ? voxels[idx] : 0;
+    s_data[tid] = (idx < size && voxels[idx] != 0) ? 1 : 0;
     __syncthreads();
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
@@ -530,45 +670,53 @@ __global__ void count_map_size_2(uint8_t *voxels, uint32_t* d_result, uint32_t s
 
 // Сериализация: один поток — один элемент. Читает data[idx] == 1, пишет индекс в indices[pos]
 // как float (битовая переинтерпретация uint32_t -> float). Не обнуляет data!
-__global__ void serialization_cuda_2(const uint8_t *data, float* indices, uint32_t* count, uint32_t size)
+__global__
+void serialization_cuda_2(const uint16_t *data,
+                          float* indices,
+                          uint16_t* values,
+                          uint32_t* count,
+                          uint32_t size)
 {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
 
-    if (data[idx] == 1) {
+    uint16_t v = data[idx];
+    if (v != 0) {
         uint32_t pos = atomicAdd(count, 1);
         indices[pos] = __uint_as_float(idx);
+        values[pos]  = v;
     }
 }
 
 __global__
-void offset_cuda_2(float *output, uint32_t *dev_world_counter, int16_t x_, int16_t y_, int16_t z_)
+void offset_cuda_2(float *indices,
+                   uint16_t *values,
+                   uint32_t *dev_world_counter,
+                   int16_t x_, int16_t y_, int16_t z_)
 {
-    uint32_t *output_u32 = reinterpret_cast<uint32_t*>(output);
-
+    uint32_t *indices_u32 = reinterpret_cast<uint32_t*>(indices);
     uint32_t i = blockDim.x * blockIdx.x + threadIdx.x;
     uint32_t stride = blockDim.x * gridDim.x;
-
     uint32_t total_points = *dev_world_counter;
 
-    for (uint32_t j = i; j < total_points; j += stride)
-    {
-        uint32_t *point = &output_u32[j];
+    for (uint32_t j = i; j < total_points; j += stride) {
+        uint32_t old_idx = indices_u32[j];
 
-        int16_t orig_z = point[0] / (Map_X * Map_Y);
-        uint32_t remaining = point[0] % (Map_X * Map_Y);
-        int16_t orig_y  = remaining / Map_Z;
-        int16_t orig_x  = point[0] % Map_Z;
+        int16_t orig_z = old_idx / (Map_X * Map_Y);
+        uint32_t rem   = old_idx % (Map_X * Map_Y);
+        int16_t orig_y = rem / Map_Z;
+        int16_t orig_x = old_idx % Map_Z;
 
         uint16_t z = orig_z - x_;
         uint16_t y = orig_y - z_;
         uint16_t x = orig_x - y_;
 
-        point[0] = 0;
-
-        if (x > 0 && y > 0 && z > 0 && x < Map_X && y < Map_Y && z < Map_Z)
-        {
-            point[0] = get_value(x, y, z);
+        if (x > 0 && y > 0 && z > 0 && x < Map_X && y < Map_Y && z < Map_Z) {
+            indices_u32[j] = get_value(x, y, z);
+            // values[j] остаётся как есть
+        } else {
+            indices_u32[j] = 0;
+            values[j]      = 0;
         }
     }
 }
@@ -576,25 +724,29 @@ void offset_cuda_2(float *output, uint32_t *dev_world_counter, int16_t x_, int16
 // Восстановление dev_voxels из сдвинутого списка индексов.
 // indices теперь float* — битовая интерпретация uint32_t (через reinterpret_cast).
 __global__
-void deserialization_cuda_2(const float *indices, uint8_t *voxels, uint32_t count)
+void deserialization_cuda_2(const float *indices,
+                            const uint16_t *values,
+                            uint16_t *voxels,
+                            uint32_t count)
 {
     const uint32_t *indices_u32 = reinterpret_cast<const uint32_t*>(indices);
-
     uint32_t i = blockDim.x * blockIdx.x + threadIdx.x;
     uint32_t stride = blockDim.x * gridDim.x;
 
-    for (uint32_t j = i; j < count; j += stride)
-    {
-        voxels[indices_u32[j]] = 1;
+    for (uint32_t j = i; j < count; j += stride) {
+        uint32_t idx = indices_u32[j];
+        uint16_t val = values[j];
+        if (val != 0 && idx != 0) {
+            voxels[idx] = val;
+        }
     }
 }
-
 
 // ============================================================================
 // Поиск высоты робота: снизу вверх по столбику в центре карты
 // ============================================================================
 __global__ void find_robot_height_kernel(
-    const uint8_t* __restrict__ dev_voxels,
+    const uint16_t* __restrict__ dev_voxels,
     int* __restrict__ dev_robot_y,
     int default_y)
 {
@@ -660,7 +812,7 @@ __global__ void heightmap_to_slope_cuda( const float* __restrict__ dev_heightmap
     int z = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= Map_X || z >= Map_Z) return;
 
-    const float cellSize = 1.0f;  // 1 воксель = 0.1 м, но мы работаем в вокселях
+    const float cellSize = 100.0f;   // мм на воксель
 
     // --- Локальный slope (окно 3×3) ---
     float hl[9], xl[9], zl[9];
@@ -760,7 +912,7 @@ __global__ void slope_to_costmap_cuda(const float* __restrict__ dev_slope, uint8
 }
 
 // Основное ядро обработки
-__device__ void processLayerCell(uint8_t* data, int x, int z, int16_t layer_y, int16_t robot_height)
+__device__ void processLayerCell(uint16_t* data, int x, int z, int16_t layer_y, int16_t robot_height)
 {
     if (data[get_value(x, layer_y, z)] == 0) return;
 
@@ -779,7 +931,7 @@ __device__ void processLayerCell(uint8_t* data, int x, int z, int16_t layer_y, i
     }
 }
 
-__global__ void collapseAllLayersKernel(uint8_t* data, const uint8_t* layer_order, int16_t robot_height)
+__global__ void collapseAllLayersKernel(uint16_t* data, const uint8_t* layer_order, int16_t robot_height)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int z = blockIdx.y * blockDim.y + threadIdx.y;
@@ -890,22 +1042,20 @@ __global__ void inflate_costmap_cuda(
 }
 
 
-__global__ void Convert_3D_voxels_map_to_2d_cost_map( const uint8_t* __restrict__ input_3d, float* __restrict__ output_heightmap)
+__global__ void Convert_3D_voxels_map_to_2d_cost_map(const uint16_t* __restrict__ input_3d,
+                                                     float* __restrict__ output_heightmap)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int z = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= Map_X || z >= Map_Z) return;
 
-    // Ищем верхний occupied
     int y_top = -1;
+    uint16_t v_mm1 = 0;
     for (int y = Map_Y - 1; y >= 0; y--) {
-        if (input_3d[get_value(x, y, z)] != 0) {
-            y_top = y;
-            break;
-        }
+        uint16_t v = input_3d[get_value(x, y, z)];
+        if (v != 0) { y_top = y; v_mm1 = v; break; }
     }
-
-    output_heightmap[z * Map_X + x] = (y_top < 0) ? -1.0f : (float)y_top;
+    output_heightmap[z * Map_X + x] = (y_top < 0) ? -1.0f : (float)((int)v_mm1 - 1);
 }
 
 
@@ -935,57 +1085,87 @@ void compute_layer_y (uint8_t arr[100], int8_t start) {
 // Инициализация / освобождение персистентных GPU-буферов
 // ============================================================================
 
-extern "C"
-__host__
-void init_cuda_map(uint8_t **dev_voxels, uint8_t **dev_costmap)
+extern "C" __host__
+void init_cuda_map(uint16_t **dev_voxels, uint8_t **dev_costmap)
 {
     cudaError_t result;
-
-    result = cudaMalloc(dev_voxels, Map_length);
-    assert(result == cudaSuccess);
-
-    result = cudaMemset(*dev_voxels, 0, Map_length);
-    assert(result == cudaSuccess);
-
-    result = cudaMalloc(dev_costmap, Map_X * Map_Z);
-    assert(result == cudaSuccess);
-
-    result = cudaMemset(*dev_costmap, 0, Map_X * Map_Z);
-    assert(result == cudaSuccess);
-
-    result = cudaDeviceSynchronize();
-    assert(result == cudaSuccess);
-
-    std::cout << "[CUDA] init_cuda_map: dev_voxels=" << (void*)*dev_voxels
-              << " dev_costmap=" << (void*)*dev_costmap << std::endl;
+    result = cudaMalloc(dev_voxels, Map_length * sizeof(uint16_t)); assert(result == cudaSuccess);
+    result = cudaMemset(*dev_voxels, 0, Map_length * sizeof(uint16_t)); assert(result == cudaSuccess);
+    result = cudaMalloc(dev_costmap, Map_X * Map_Z); assert(result == cudaSuccess);
+    result = cudaMemset(*dev_costmap, 0, Map_X * Map_Z); assert(result == cudaSuccess);
+    cudaDeviceSynchronize();
+    std::cout << "[CUDA] init_cuda_map done" << std::endl;
 }
 
-extern "C"
-__host__
-void cleanup_cuda_map(uint8_t *dev_voxels, uint8_t *dev_costmap)
+extern "C" __host__
+void cleanup_cuda_map(uint16_t *dev_voxels, uint8_t *dev_costmap)
 {
-    cudaError_t result;
-
-    if (dev_voxels) {
-        result = cudaFree(dev_voxels);
-        assert(result == cudaSuccess);
-    }
-    if (dev_costmap) {
-        result = cudaFree(dev_costmap);
-        assert(result == cudaSuccess);
-    }
-
-    result = cudaDeviceSynchronize();
-    assert(result == cudaSuccess);
-
+    if (dev_voxels)  cudaFree(dev_voxels);
+    if (dev_costmap) cudaFree(dev_costmap);
+    cudaDeviceSynchronize();
     std::cout << "[CUDA] cleanup_cuda_map done" << std::endl;
 }
 
+extern "C" __host__
+int init_frustum_cuda(const rs2_intrinsics &intrin)
+{
+    cudaError_t result;
 
-extern "C"
-__host__
+    float fov[2];
+    rs2_fov(&intrin, fov);   // градусы
+
+    float fov_h_rad = fov[0] * (float)M_PI / 180.0f;
+    float fov_v_rad = fov[1] * (float)M_PI / 180.0f;
+    float tan_half_h = tanf(fov_h_rad / 2.0f);
+    float tan_half_v = tanf(fov_v_rad / 2.0f);
+
+    const float NEAR_MM = CAM_NEAR_MM;
+    const float FAR_MM  = CAM_FAR_MM;
+    const float VOX_MM  = FRUSTUM_VOXEL_MM;
+
+    int Nz = (int)((FAR_MM - NEAR_MM) / VOX_MM);
+    assert(Nz <= FRUSTUM_MAX_LAYERS && "frustum layers exceed FRUSTUM_MAX_LAYERS");
+
+    int Nx_arr[FRUSTUM_MAX_LAYERS] = {0};
+    int Ny_arr[FRUSTUM_MAX_LAYERS] = {0};
+    int off_arr[FRUSTUM_MAX_LAYERS] = {0};
+
+    int offset = 0;
+    for (int iz = 0; iz < Nz; ++iz) {
+        float z_center = NEAR_MM + iz * VOX_MM + VOX_MM * 0.5f;
+        float half_x = z_center * tan_half_h;
+        float half_y = z_center * tan_half_v;
+        int Nx = (int)floorf(2.0f * half_x / VOX_MM);
+        int Ny = (int)floorf(2.0f * half_y / VOX_MM);
+        if (Nx < 1) Nx = 1;
+        if (Ny < 1) Ny = 1;
+        Nx_arr[iz] = Nx;
+        Ny_arr[iz] = Ny;
+        off_arr[iz] = offset;
+        offset += Nx * Ny;
+    }
+    int total_voxels = offset;
+
+    result = cudaMemcpyToSymbol(c_Nz, &Nz, sizeof(int)); assert(result == cudaSuccess);
+    result = cudaMemcpyToSymbol(c_Nx_per_layer, Nx_arr, sizeof(int) * Nz); assert(result == cudaSuccess);
+    result = cudaMemcpyToSymbol(c_Ny_per_layer, Ny_arr, sizeof(int) * Nz); assert(result == cudaSuccess);
+    result = cudaMemcpyToSymbol(c_layer_offset, off_arr, sizeof(int) * Nz); assert(result == cudaSuccess);
+    result = cudaMemcpyToSymbol(c_tan_half_h, &tan_half_h, sizeof(float)); assert(result == cudaSuccess);
+    result = cudaMemcpyToSymbol(c_tan_half_v, &tan_half_v, sizeof(float)); assert(result == cudaSuccess);
+    result = cudaMemcpyToSymbol(c_cam_near_mm, &NEAR_MM, sizeof(float)); assert(result == cudaSuccess);
+    result = cudaMemcpyToSymbol(c_cam_far_mm, &FAR_MM, sizeof(float)); assert(result == cudaSuccess);
+
+    std::cout << "[CUDA] init_frustum_cuda: Nz=" << Nz
+              << " total_voxels=" << total_voxels
+              << " fov_h=" << fov[0] << " fov_v=" << fov[1] << std::endl;
+
+    return total_voxels;
+}
+
+extern "C" __host__
 void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter,
-                          uint8_t *dev_voxels,
+                          uint16_t *dev_voxels,
+                          uint32_t total_voxels_frustum,
                           const rs2_intrinsics &intrin, const uint16_t *depth, float depth_scale,
                           double w, double x, double y, double z,
                           int16_t x_, int16_t y_, int16_t z_,
@@ -997,9 +1177,9 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     int count = intrin.height * intrin.width;
     int numBlocks = count / RS2_CUDA_THREADS_PER_BLOCK;
 
-    int border_top = 100;
+    int border_top = 50;
     int border_bottom = 0;
-    int border_left = 100;
+    int border_left = 50;
     int border_right = 20;
 
     // ========================================================================
@@ -1007,34 +1187,34 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     // ========================================================================
     uint16_t *dev_depth;
     rs2_intrinsics *dev_intrin;
-    uint16_t *dev_ray_points;
+    int16_t  *dev_ray_points_cam;
+    uint16_t *dev_ray_points_world;
     uint32_t *dev_local_counter;
-    float *dev_serializ_point;
-
-    result = cudaMalloc(&dev_ray_points, count * sizeof(uint16_t) * 3);
-    //std::cout << "Stage 1 (malloc ray_points)" << std::endl;
-    assert(result == cudaSuccess);
 
     result = cudaMalloc(&dev_depth, count * sizeof(uint16_t));
-    //std::cout << "Stage 2 (malloc depth)" << std::endl;
+    //std::cout << "Stage 1 (malloc depth)" << std::endl;
     assert(result == cudaSuccess);
 
     result = cudaMalloc(&dev_intrin, sizeof(rs2_intrinsics));
-    //std::cout << "Stage 3 (malloc intrin)" << std::endl;
+    //std::cout << "Stage 2 (malloc intrin)" << std::endl;
+    assert(result == cudaSuccess);
+
+    result = cudaMalloc(&dev_ray_points_cam, (size_t)total_voxels_frustum * 3 * sizeof(int16_t));
+    //std::cout << "Stage 3 (malloc ray_points_cam, total_voxels=" << total_voxels << ")" << std::endl;
+    assert(result == cudaSuccess);
+
+    result = cudaMalloc(&dev_ray_points_world, (size_t)total_voxels_frustum * 3 * sizeof(uint16_t));
+    //std::cout << "Stage 4 (malloc ray_points_world)" << std::endl;
     assert(result == cudaSuccess);
 
     uint32_t blocks = (Map_length + RS2_CUDA_THREADS_PER_BLOCK - 1) / RS2_CUDA_THREADS_PER_BLOCK;
 
     result = cudaMalloc(&dev_local_counter, blocks * sizeof(uint32_t));
-    //std::cout << "Stage 4 (malloc local_counter, blocks=" << blocks << ")" << std::endl;
+    //std::cout << "Stage 5 (malloc local_counter, blocks=" << blocks << ")" << std::endl;
     assert(result == cudaSuccess);
 
     result = cudaMemset(dev_local_counter, 0, blocks * sizeof(uint32_t));
-    //std::cout << "Stage 5 (memset local_counter)" << std::endl;
-    assert(result == cudaSuccess);
-
-    result = cudaMalloc(&dev_serializ_point, Map_length * sizeof(float));
-    //std::cout << "Stage 6 (malloc serializ_point)" << std::endl;
+    //std::cout << "Stage 6 (memset local_counter)" << std::endl;
     assert(result == cudaSuccess);
 
     // ========================================================================
@@ -1062,58 +1242,66 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     assert(result == cudaSuccess);
 
     // ========================================================================
-    // DEPROJECT
+    // ОБНУЛЯЕМ ray_points_cam ПЕРЕД DEPROJECT
+    // ========================================================================
+    result = cudaMemset(dev_ray_points_cam, 0, (size_t)total_voxels_frustum * 3 * sizeof(int16_t));
+    //std::cout << "Stage 10 (memset ray_points_cam)" << std::endl;
+    assert(result == cudaSuccess);
+
+    // ========================================================================
+    // DEPROJECT + FRUSTUM BINNING (СК камеры)
     // ========================================================================
     kernel_deproject_depth_cuda<<<numBlocks, RS2_CUDA_THREADS_PER_BLOCK>>>(
-        dev_ray_points, dev_intrin, dev_depth,
-        depth_scale, w, x, y, z);
-
+        dev_ray_points_cam, dev_intrin, dev_depth, depth_scale);
     result = cudaDeviceSynchronize();
-    //std::cout << "Stage 10 (kernel_deproject_depth_cuda)" << std::endl;
+    //std::cout << "Stage 11 (kernel_deproject_depth_cuda)" << std::endl;
     assert(result == cudaSuccess);
 
     cudaFree(dev_depth);
     cudaFree(dev_intrin);
 
     // ========================================================================
+    // ПОВОРОТ: СК камеры → СК карты
+    // ========================================================================
+    rotate_ray_points_to_world<<<128, 128>>>(
+        dev_ray_points_cam, dev_ray_points_world, total_voxels_frustum, w, x, y, z);
+    result = cudaDeviceSynchronize();
+    //std::cout << "Stage 12 (rotate_ray_points_to_world)" << std::endl;
+    assert(result == cudaSuccess);
+
+    // ========================================================================
     // RAY CASTING (камера)
     // ========================================================================
-    ray_casting_map<<<128, 128>>>(dev_voxels, dev_ray_points, count);
-
+    ray_casting_map<<<128, 128>>>(dev_voxels, dev_ray_points_world, total_voxels_frustum);
     result = cudaDeviceSynchronize();
-    //std::cout << "Stage 11 (ray_casting_map camera)" << std::endl;
+    //std::cout << "Stage 13 (ray_casting_map camera)" << std::endl;
     assert(result == cudaSuccess);
 
     // ========================================================================
-    // ВОКСЕЛИЗАЦИЯ
+    // ВОКСЕЛИЗАЦИЯ (камера)
     // ========================================================================
-    voxelization_cuda<<<128, 128>>>(dev_voxels, dev_ray_points, count);
-
+    voxelization_cuda<<<128, 128>>>(dev_voxels, dev_ray_points_world, total_voxels_frustum);
     result = cudaDeviceSynchronize();
-    //std::cout << "Stage 12 (voxelization_cuda)" << std::endl;
+    //std::cout << "Stage 14 (voxelization_cuda camera)" << std::endl;
     assert(result == cudaSuccess);
-
-    cudaFree(dev_ray_points);
 
     // ========================================================================
     // ОБРАБОТКА ЛИДАРА
     // ========================================================================
-
     if (lidar_size > 0) {
         int16_t *dev_lidar_pcl;
         result = cudaMalloc(&dev_lidar_pcl, lidar_size * 3 * sizeof(int16_t));
-        //std::cout << "Stage 13.1 (malloc lidar_pcl, size=" << lidar_size << ")" << std::endl;
+        //std::cout << "Stage 15.1 (malloc lidar_pcl, size=" << lidar_size << ")" << std::endl;
         assert(result == cudaSuccess);
 
         result = cudaMemcpy(dev_lidar_pcl, lidar_pcl,
                             lidar_size * 3 * sizeof(int16_t), cudaMemcpyHostToDevice);
-        //std::cout << "Stage 13.2 (memcpy lidar_pcl)" << std::endl;
+        //std::cout << "Stage 15.2 (memcpy lidar_pcl)" << std::endl;
         assert(result == cudaSuccess);
 
-        // Ray casting — зачищаем free space по актуальному скану
         ray_casting_map_lidar<<<128, 128>>>(dev_voxels, dev_lidar_pcl, lidar_size);
         result = cudaDeviceSynchronize();
-        //std::cout << "Stage 13.3 (ray_casting_map_lidar)" << std::endl;
+        //std::cout << "Stage 15.3 (ray_casting_map_lidar)" << std::endl;
         assert(result == cudaSuccess);
 
         cudaFree(dev_lidar_pcl);
@@ -1122,18 +1310,17 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     if (keyframe_size > 0) {
         int16_t *dev_keyframe_pcl;
         result = cudaMalloc(&dev_keyframe_pcl, keyframe_size * 3 * sizeof(int16_t));
-        //std::cout << "Stage 13.4 (malloc keyframe_pcl, size=" << keyframe_size << ")" << std::endl;
+        //std::cout << "Stage 16.1 (malloc keyframe_pcl, size=" << keyframe_size << ")" << std::endl;
         assert(result == cudaSuccess);
 
         result = cudaMemcpy(dev_keyframe_pcl, keyframe_pcl,
                             keyframe_size * 3 * sizeof(int16_t), cudaMemcpyHostToDevice);
-        //std::cout << "Stage 13.5 (memcpy keyframe_pcl)" << std::endl;
+        //std::cout << "Stage 16.2 (memcpy keyframe_pcl)" << std::endl;
         assert(result == cudaSuccess);
 
-        // voxelization — ставим occupied по накопленному keyframe
         voxelization_cuda_lidar<<<128, 128>>>(dev_voxels, dev_keyframe_pcl, keyframe_size);
         result = cudaDeviceSynchronize();
-        //std::cout << "Stage 13.6 (voxelization_cuda_lidar keyframe)" << std::endl;
+        //std::cout << "Stage 16.3 (voxelization_cuda_lidar keyframe)" << std::endl;
         assert(result == cudaSuccess);
 
         cudaFree(dev_keyframe_pcl);
@@ -1142,16 +1329,14 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     // ========================================================================
     // ПОДСЧЁТ ЗАНЯТЫХ ВОКСЕЛЕЙ
     // ========================================================================
-
     count_map_size_2<<<blocks, RS2_CUDA_THREADS_PER_BLOCK>>>(dev_voxels, dev_local_counter, Map_length);
-
     result = cudaDeviceSynchronize();
-    //std::cout << "Stage 14 (count_map_size_2)" << std::endl;
+    //std::cout << "Stage 17 (count_map_size_2)" << std::endl;
     assert(result == cudaSuccess);
 
     uint32_t *h_result = new uint32_t[blocks];
     result = cudaMemcpy(h_result, dev_local_counter, blocks * sizeof(uint32_t), cudaMemcpyDeviceToHost);
-    //std::cout << "Stage 15 (memcpy count result)" << std::endl;
+    //std::cout << "Stage 18 (memcpy count result)" << std::endl;
     assert(result == cudaSuccess);
 
     uint32_t total_sum = 0;
@@ -1159,66 +1344,91 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     delete[] h_result;
 
     *world_counter = total_sum;
-    //std::cout << "Stage 16 (world_counter = " << total_sum << ")" << std::endl;
+    //std::cout << "Stage 19 (world_counter = " << total_sum << ")" << std::endl;
+
+    // ========================================================================
+    // АЛЛОКАЦИЯ SERIALIZE-БУФЕРОВ ПОД total_sum
+    // ========================================================================
+    float    *dev_serializ_point  = nullptr;
+    uint16_t *dev_serializ_values = nullptr;
+
+    if (total_sum > 0) {
+        result = cudaMalloc(&dev_serializ_point, (size_t)total_sum * sizeof(float));
+        //std::cout << "Stage 20 (malloc serializ_point, size=" << total_sum << ")" << std::endl;
+        assert(result == cudaSuccess);
+
+        result = cudaMalloc(&dev_serializ_values, (size_t)total_sum * sizeof(uint16_t));
+        //std::cout << "Stage 21 (malloc serializ_values)" << std::endl;
+        assert(result == cudaSuccess);
+    }
 
     // ========================================================================
     // СЕРИАЛИЗАЦИЯ
     // ========================================================================
-    cudaMemset(dev_local_counter, 0, blocks * sizeof(uint32_t));
-    //std::cout << "Stage 17 (reset local_counter)" << std::endl;
+    result = cudaMemset(dev_local_counter, 0, blocks * sizeof(uint32_t));
+    //std::cout << "Stage 22 (reset local_counter)" << std::endl;
     assert(result == cudaSuccess);
 
-    serialization_cuda_2<<<blocks, RS2_CUDA_THREADS_PER_BLOCK>>>(
-        dev_voxels, dev_serializ_point, dev_local_counter, Map_length);
+    if (total_sum > 0) {
+        serialization_cuda_2<<<blocks, RS2_CUDA_THREADS_PER_BLOCK>>>(
+            dev_voxels, dev_serializ_point, dev_serializ_values,
+            dev_local_counter, Map_length);
+        result = cudaDeviceSynchronize();
+        //std::cout << "Stage 23 (serialization_cuda_2)" << std::endl;
+        assert(result == cudaSuccess);
 
-    result = cudaDeviceSynchronize();
-    //std::cout << "Stage 18 (serialization_cuda_2)" << std::endl;
-    assert(result == cudaSuccess);
-
-    // ========================================================================
-    // СДВИГ СПИСКА
-    // ========================================================================
-    offset_cuda_2<<<128, 128>>>(dev_serializ_point, dev_local_counter, x_, y_, z_);
-
-    result = cudaDeviceSynchronize();
-    //std::cout << "Stage 19 (offset_cuda_2)" << std::endl;
-    assert(result == cudaSuccess);
+        // ====================================================================
+        // СДВИГ СПИСКА
+        // ====================================================================
+        offset_cuda_2<<<128, 128>>>(dev_serializ_point, dev_serializ_values,
+                                    dev_local_counter, x_, y_, z_);
+        result = cudaDeviceSynchronize();
+        //std::cout << "Stage 24 (offset_cuda_2)" << std::endl;
+        assert(result == cudaSuccess);
+    }
 
     // ========================================================================
     // ДЕСЕРИАЛИЗАЦИЯ
     // ========================================================================
-    result = cudaMemset(dev_voxels, 0, Map_length);
-    //std::cout << "Stage 20 (memset dev_voxels)" << std::endl;
+    result = cudaMemset(dev_voxels, 0, Map_length * sizeof(uint16_t));
+    //std::cout << "Stage 25 (memset dev_voxels)" << std::endl;
     assert(result == cudaSuccess);
 
-    deserialization_cuda_2<<<blocks, RS2_CUDA_THREADS_PER_BLOCK>>>(
-        dev_serializ_point, dev_voxels, total_sum);
+    if (total_sum > 0) {
+        deserialization_cuda_2<<<blocks, RS2_CUDA_THREADS_PER_BLOCK>>>(
+            dev_serializ_point, dev_serializ_values, dev_voxels, total_sum);
+        result = cudaDeviceSynchronize();
+        //std::cout << "Stage 26 (deserialization_cuda_2)" << std::endl;
+        assert(result == cudaSuccess);
 
-    result = cudaDeviceSynchronize();
-    //std::cout << "Stage 21 (deserialization_cuda_2)" << std::endl;
-    assert(result == cudaSuccess);
+        // ====================================================================
+        // КОПИЯ СПИСКА НА CPU
+        // ====================================================================
+        float *buff = (float*)malloc(total_sum * sizeof(float));
+        result = cudaMemcpy(buff, dev_serializ_point, total_sum * sizeof(float), cudaMemcpyDeviceToHost);
+        //std::cout << "Stage 27 (memcpy serializ_point to CPU)" << std::endl;
+        assert(result == cudaSuccess);
 
-    // ========================================================================
-    // КОПИЯ СПИСКА НА CPU
-    // ========================================================================
-    float *buff = (float*)malloc(total_sum * sizeof(float));
-    result = cudaMemcpy(buff, dev_serializ_point, total_sum * sizeof(float), cudaMemcpyDeviceToHost);
-    //std::cout << "Stage 22 (memcpy serializ_point to CPU)" << std::endl;
-    assert(result == cudaSuccess);
-
-    *serialization_point_1 = buff;
+        *serialization_point_1 = buff;
+    } else {
+        *serialization_point_1 = nullptr;
+        //std::cout << "Stage 27 (serialization_point_1 = nullptr, empty map)" << std::endl;
+    }
 
     // ========================================================================
     // ОСВОБОЖДЕНИЕ
     // ========================================================================
+    cudaFree(dev_ray_points_cam);
+    cudaFree(dev_ray_points_world);
     cudaFree(dev_local_counter);
-    cudaFree(dev_serializ_point);
+    if (dev_serializ_point)  cudaFree(dev_serializ_point);
+    if (dev_serializ_values) cudaFree(dev_serializ_values);
 
     result = cudaDeviceSynchronize();
-    //std::cout << "Stage 23 (final sync)" << std::endl;
+    //std::cout << "Stage 28 (final sync)" << std::endl;
     assert(result == cudaSuccess);
-
 }
+
 
 // ============================================================================
 // Построение 2D costmap из 3D воксельной карты
@@ -1227,12 +1437,11 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
 
 extern "C"
 __host__
-void process_costmap_cuda(uint8_t *dev_voxels, uint8_t *dev_costmap,
-                          uint8_t *costmap_host, int16_t current_y)
+void process_costmap_cuda(uint16_t *dev_voxels, uint8_t *dev_costmap, uint8_t *costmap_host)
 {
     cudaError_t result;
 
-    const float max_slope    = 2.0f;
+    const float max_slope    = 2.5f;
     const float flat_slope   = 0.1f;
     const int   inscribed_r  = 2;
     const int   inflation_r  = 4;
@@ -1245,13 +1454,13 @@ void process_costmap_cuda(uint8_t *dev_voxels, uint8_t *dev_costmap,
     // ========================================================================
     // Локальные буферы
     // ========================================================================
-    uint8_t* dev_voxels_copy;
-    float*   dev_heightmap;
-    float*   dev_slope;
-    uint8_t* dev_costmap_tmp;
-    int*     dev_robot_y;
+    uint16_t* dev_voxels_copy;
+    float*    dev_heightmap;
+    float*    dev_slope;
+    uint8_t*  dev_costmap_tmp;
+    int*      dev_robot_y;
 
-    result = cudaMalloc(&dev_voxels_copy, Map_length);
+    result = cudaMalloc(&dev_voxels_copy, Map_length * sizeof(uint16_t));
     assert(result == cudaSuccess);
     result = cudaMalloc(&dev_heightmap, Map_X * Map_Z * sizeof(float));
     assert(result == cudaSuccess);
@@ -1265,7 +1474,7 @@ void process_costmap_cuda(uint8_t *dev_voxels, uint8_t *dev_costmap,
     // ========================================================================
     // Шаг 0: Копия dev_voxels → dev_voxels_copy
     // ========================================================================
-    result = cudaMemcpy(dev_voxels_copy, dev_voxels, Map_length, cudaMemcpyDeviceToDevice);
+    result = cudaMemcpy(dev_voxels_copy, dev_voxels, Map_length * sizeof(uint16_t), cudaMemcpyDeviceToDevice);
     assert(result == cudaSuccess);
     //std::cout << "Costmap Stage 0 (copy dev_voxels)" << std::endl;
 
@@ -1276,14 +1485,49 @@ void process_costmap_cuda(uint8_t *dev_voxels, uint8_t *dev_costmap,
     result = cudaDeviceSynchronize();
     assert(result == cudaSuccess);
 
-    int robot_y = current_y;
+    int robot_y = 0;
     result = cudaMemcpy(&robot_y, dev_robot_y, sizeof(int), cudaMemcpyDeviceToHost);
     assert(result == cudaSuccess);
 
-    //std::cout << "Costmap: robot_y = " << robot_y << " (был " << current_y << ")" << std::endl;
+    std::cout << "\n========== LAYER_Y DEBUG ==========" << std::endl;
+    std::cout << "Costmap: robot_y = " << robot_y << std::endl;
 
     uint8_t layer_y[100];
     compute_layer_y(layer_y, robot_y);
+
+    // === Вывод всех 100 элементов в строках по 10 ===
+    std::cout << "layer_y[100]:" << std::endl;
+    for (int i = 0; i < 100; ++i) {
+        if (i % 10 == 0) std::cout << "  [" << std::setw(3) << i << "] ";
+        std::cout << std::setw(3) << (int)layer_y[i] << " ";
+        if (i % 10 == 9) std::cout << std::endl;
+    }
+
+    // === Проверка на дубликаты ===
+    bool seen[256] = {false};
+    int duplicates = 0;
+    int out_of_range = 0;
+    for (int i = 0; i < 100; ++i) {
+        uint8_t v = layer_y[i];
+        if (v >= 100) {
+            out_of_range++;
+            continue;
+        }
+        if (seen[v]) duplicates++;
+        seen[v] = true;
+    }
+    std::cout << "duplicates = " << duplicates
+              << ", out_of_range (>=100) = " << out_of_range
+              << std::endl;
+
+    // === Первые 20 элементов — самые важные (обход начинается с них) ===
+    std::cout << "first 20 (порядок обхода): ";
+    for (int i = 0; i < 20; ++i) {
+        std::cout << (int)layer_y[i] << " ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "===================================\n" << std::endl;
 
     // ========================================================================
     // Шаг 2: Обход 100 слоёв — один launch, приоритет внутри ядра

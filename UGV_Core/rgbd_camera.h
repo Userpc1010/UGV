@@ -65,7 +65,7 @@ CostmapColorizer * colorizer;
 
 uint32_t world_counter;
 
- uint8_t  *dev_voxels;        // GPU-указатель на воксельную карту (16 МБ)
+ uint16_t  *dev_voxels;        // GPU-указатель на воксельную карту (16 МБ)
  uint8_t  *dev_costmap;       // GPU-указатель на 2D costmap (1.6 МБ)
  float *serialization_point;  // CPU-копия списка индексов для визуализации
  uint8_t  *costmap;           // CPU-копия costmap (остаётся)
@@ -168,6 +168,8 @@ private:
  int target_remainder = -1;       // -1 означает, что фаза еще не определена
 
   uint8_t state = 0;
+
+  uint32_t total_voxels_frustum = 0;
 
   GLfloat * vertices_data;
   bool ptr_guard_vertices_data = false;
