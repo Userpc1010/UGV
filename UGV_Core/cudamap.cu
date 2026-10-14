@@ -17,7 +17,7 @@
 #define Map_center_Y 49
 #define Map_center_Z 199
 #define Map_scale 10.0f
-#define DEFAULT_ROBOT_Y 45
+#define DEFAULT_ROBOT_Y 57
 #define ROBOT_HEIGHT 5
 
 // ============================================================================
@@ -504,7 +504,7 @@ void Raycast_2_cuda(uint16_t * voxels, const uint16_t start[3], const uint16_t e
             int ddx = (int)x - (int)endX;
             int ddy = (int)y - (int)endY;
             int ddz = (int)z - (int)endZ;
-            if (ddx*ddx + ddy*ddy + ddz*ddz <= 9) return;   // радиус 3
+            if (ddx*ddx + ddy*ddy + ddz*ddz <= 3) return;   // радиус 3
 
             voxels[get_value(x,y,z)] = 0;
 
@@ -758,7 +758,7 @@ __global__ void find_robot_height_kernel(
 
     int found_y = -1;
 
-    // Идём снизу вверх: y = 0..Map_Y-1
+
     for (int y = 0; y < Map_Y; y++) {
         if (dev_voxels[get_value(cx, y, cz)] != 0) {
             found_y = y;
@@ -917,13 +917,16 @@ __device__ void processLayerCell(uint16_t* data, int x, int z, int16_t layer_y, 
     if (data[get_value(x, layer_y, z)] == 0) return;
 
     int y_top = layer_y;
-    int y_max = min(layer_y + robot_height, Map_Y - 1);
-    for (int yy = layer_y + 1; yy <= y_max; yy++) {
+    int y_min = max(layer_y - robot_height, 0);   // ← нижняя граница (в сторону меньших y)
+
+    // Идём В СТОРОНУ МЕНЬШИХ y (вверх по сцене)
+    for (int yy = layer_y - 1; yy >= y_min; yy--) {
         if (data[get_value(x, yy, z)] != 0) {
-            y_top = yy;
+            y_top = yy;   // оставляем последний найденный (самый маленький y = верхний по сцене)
         }
     }
 
+    // Оставляем только y_top
     for (int yy = 0; yy < Map_Y; yy++) {
         if (yy != y_top) {
             data[get_value(x, yy, z)] = 0;
@@ -1051,32 +1054,43 @@ __global__ void Convert_3D_voxels_map_to_2d_cost_map(const uint16_t* __restrict_
 
     int y_top = -1;
     uint16_t v_mm1 = 0;
-    for (int y = Map_Y - 1; y >= 0; y--) {
+
+    for (int y = 0; y < Map_Y; y++) {
         uint16_t v = input_3d[get_value(x, y, z)];
         if (v != 0) { y_top = y; v_mm1 = v; break; }
     }
-    output_heightmap[z * Map_X + x] = (y_top < 0) ? -1.0f : (float)((int)v_mm1 - 1);
+
+    if (y_top < 0) {
+        output_heightmap[z * Map_X + x] = -1.0f;
+        return;
+    }
+
+    int y_mm_raw = (int)v_mm1 - 1;
+
+
+    const int MM_MAX = Map_Y * (100 - 1);
+    int y_mm_inv = MM_MAX - y_mm_raw;
+
+    output_heightmap[z * Map_X + x] = (float)y_mm_inv;
 }
 
 
-void compute_layer_y (uint8_t arr[100], int8_t start) {
-    int8_t left = start;
-    int8_t right = start;
+void compute_layer_y(uint8_t arr[100], int8_t start)
+{
     int8_t count = 0;
-
     arr[count++] = start;
 
     for (int8_t step = 1; count < 100; step++) {
-        // Правая сторона (увеличиваем)
-        right = start + step;
-        if (right < 100 && count < 100) {
-            arr[count++] = right;
+        // Сначала ВВЕРХ по сцене (меньший y)
+        int8_t up = start - step;
+        if (up >= 0 && count < 100) {
+            arr[count++] = up;
         }
 
-        // Левая сторона (уменьшаем)
-        left = start - step;
-        if (left >= 0 && count < 100) {
-            arr[count++] = left;
+        // Потом ВНИЗ по сцене (больший y)
+        int8_t down = start + step;
+        if (down < 100 && count < 100) {
+            arr[count++] = down;
         }
     }
 }
@@ -1441,8 +1455,8 @@ void process_costmap_cuda(uint16_t *dev_voxels, uint8_t *dev_costmap, uint8_t *c
 {
     cudaError_t result;
 
-    const float max_slope    = 2.5f;
-    const float flat_slope   = 0.1f;
+    const float max_slope    = 2.0f;
+    const float flat_slope   = 0.10f;
     const int   inscribed_r  = 2;
     const int   inflation_r  = 4;
     const float cost_scaling = 15.0f;
@@ -1489,45 +1503,8 @@ void process_costmap_cuda(uint16_t *dev_voxels, uint8_t *dev_costmap, uint8_t *c
     result = cudaMemcpy(&robot_y, dev_robot_y, sizeof(int), cudaMemcpyDeviceToHost);
     assert(result == cudaSuccess);
 
-    std::cout << "\n========== LAYER_Y DEBUG ==========" << std::endl;
-    std::cout << "Costmap: robot_y = " << robot_y << std::endl;
-
     uint8_t layer_y[100];
     compute_layer_y(layer_y, robot_y);
-
-    // === Вывод всех 100 элементов в строках по 10 ===
-    std::cout << "layer_y[100]:" << std::endl;
-    for (int i = 0; i < 100; ++i) {
-        if (i % 10 == 0) std::cout << "  [" << std::setw(3) << i << "] ";
-        std::cout << std::setw(3) << (int)layer_y[i] << " ";
-        if (i % 10 == 9) std::cout << std::endl;
-    }
-
-    // === Проверка на дубликаты ===
-    bool seen[256] = {false};
-    int duplicates = 0;
-    int out_of_range = 0;
-    for (int i = 0; i < 100; ++i) {
-        uint8_t v = layer_y[i];
-        if (v >= 100) {
-            out_of_range++;
-            continue;
-        }
-        if (seen[v]) duplicates++;
-        seen[v] = true;
-    }
-    std::cout << "duplicates = " << duplicates
-              << ", out_of_range (>=100) = " << out_of_range
-              << std::endl;
-
-    // === Первые 20 элементов — самые важные (обход начинается с них) ===
-    std::cout << "first 20 (порядок обхода): ";
-    for (int i = 0; i < 20; ++i) {
-        std::cout << (int)layer_y[i] << " ";
-    }
-    std::cout << std::endl;
-
-    std::cout << "===================================\n" << std::endl;
 
     // ========================================================================
     // Шаг 2: Обход 100 слоёв — один launch, приоритет внутри ядра
