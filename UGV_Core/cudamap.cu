@@ -117,11 +117,11 @@ uint32_t get_value_frustum(const uint16_t iz,
                            const uint16_t iy,
                            const uint16_t ix)
 {
-    uint32_t voxel_idx = (uint32_t)c_layer_offset[iz]
-                       + (uint32_t)iy * (uint32_t)c_Nx_per_layer[iz]
-                       + (uint32_t)ix;
-    return voxel_idx * 3;
+    return (uint32_t)c_layer_offset[iz]
+         + (uint32_t)iy * (uint32_t)c_Nx_per_layer[iz]
+         + (uint32_t)ix;
 }
+
 
 __device__
 float map_depth (float depth_scale, uint16_t z) {
@@ -229,9 +229,8 @@ void deproject_pixel_to_point_cuda(float points[3], const struct rs2_intrinsics 
 
 }
 
-
 __global__
-void kernel_deproject_depth_cuda(int16_t *ray_points_cam,
+void kernel_deproject_depth_cuda(unsigned long long *ray_points_cam,
                                  const rs2_intrinsics* intrin,
                                  const uint16_t * depth,
                                  float depth_scale)
@@ -276,41 +275,36 @@ void kernel_deproject_depth_cuda(int16_t *ray_points_cam,
         int16_t y_mm = (int16_t)yf;
         int16_t z_mm = (int16_t)zf;
 
-        uint32_t base = get_value_frustum((uint16_t)iz, (uint16_t)iy, (uint16_t)ix);
-        int16_t *p = &ray_points_cam[base];
+        // Центроид вокселя
+        float cx = -half_x + (ix + 0.5f) * FRUSTUM_VOXEL_MM;
+        float cy = -half_y + (iy + 0.5f) * FRUSTUM_VOXEL_MM;
+        float cz = z_center;
 
-        if (p[2] == 0) {
+        float dxn = xf - cx, dyn = yf - cy, dzn = zf - cz;
+        uint32_t d_new = (uint32_t)(dxn*dxn + dyn*dyn + dzn*dzn);
 
-            p[0] = x_mm;
-            p[1] = y_mm;
-            p[2] = z_mm;
+        // Клампим dist² в 16 бит
+        if (d_new > 0xFFFFu) d_new = 0xFFFFu;
 
-        } else {
-            float cx = -half_x + (ix + 0.5f) * FRUSTUM_VOXEL_MM;
-            float cy = -half_y + (iy + 0.5f) * FRUSTUM_VOXEL_MM;
-            float cz = z_center;
+        // Сдвигаем координаты в [0, 65535] (для беззнакового сравнения в atomicMin)
+        uint64_t ux = (uint64_t)((int32_t)x_mm + 32768);
+        uint64_t uy = (uint64_t)((int32_t)y_mm + 32768);
+        uint64_t uz = (uint64_t)((int32_t)z_mm + 32768);
 
-            float dxn = xf - cx, dyn = yf - cy, dzn = zf - cz;
-            float d_new = dxn*dxn + dyn*dyn + dzn*dzn;
+        // Упаковка: [63:48] dist² | [47:32] x | [31:16] y | [15:0] z
+        unsigned long long packed = ((unsigned long long)d_new << 48)
+                                  | ((unsigned long long)ux << 32)
+                                  | ((unsigned long long)uy << 16)
+                                  |  (unsigned long long)uz;
 
-            float dxo = (float)p[0] - cx;
-            float dyo = (float)p[1] - cy;
-            float dzo = (float)p[2] - cz;
-            float d_old = dxo*dxo + dyo*dyo + dzo*dzo;
-
-            if (d_new < d_old) {
-
-                p[0] = x_mm;
-                p[1] = y_mm;
-                p[2] = z_mm;
-            }
-        }
+        uint32_t voxel_idx = get_value_frustum((uint16_t)iz, (uint16_t)iy, (uint16_t)ix);
+        atomicMin(&ray_points_cam[voxel_idx], packed);
     }
 }
 
 
 __global__
-void rotate_ray_points_to_world(const int16_t *ray_points_cam,
+void rotate_ray_points_to_world(const unsigned long long *ray_points_cam,
                                 uint16_t *ray_points_world,
                                 const unsigned int counter,
                                 double w, double x, double y, double z)
@@ -324,10 +318,28 @@ void rotate_ray_points_to_world(const int16_t *ray_points_cam,
     const float xy=x*y, xz=x*z, yz=y*z;
     const float two = 2.0f;
 
-    for (int j = i; j < counter; j += stride) {
-        int16_t cx = ray_points_cam[j*3];
-        int16_t cy = ray_points_cam[1 + j*3];
-        int16_t cz = ray_points_cam[2 + j*3];
+    const unsigned long long MAX_PACKED = 0xFFFFFFFFFFFFFFFFULL;
+
+       for (int j = i; j < counter; j += stride) {
+
+       unsigned long long packed = ray_points_cam[j];
+
+        // Если буфер не перезаписан — пусто
+        if (packed == MAX_PACKED) {
+            ray_points_world[j*3]     = 0;
+            ray_points_world[1 + j*3] = 0;
+            ray_points_world[2 + j*3] = 0;
+            continue;
+        }
+
+        // Распаковка: [63:48] dist² | [47:32] x | [31:16] y | [15:0] z
+        unsigned long long ux = (packed >> 32) & 0xFFFFULL;
+        unsigned long long uy = (packed >> 16) & 0xFFFFULL;
+        unsigned long long uz =  packed        & 0xFFFFULL;
+
+        int16_t cx = (int16_t)((int32_t)ux - 32768);
+        int16_t cy = (int16_t)((int32_t)uy - 32768);
+        int16_t cz = (int16_t)((int32_t)uz - 32768);
 
         if (cz == 0) {
             ray_points_world[j*3]     = 0;
@@ -341,37 +353,27 @@ void rotate_ray_points_to_world(const int16_t *ray_points_cam,
         float py = cy * 0.001f;
         float pz = cz * 0.001f;
 
-        // ================================================================
-        // 1. Калибровка камеры (Rotation_matrix)
-        // ================================================================
+        // 1. Калибровка камеры
         float ps0 = Rotation_matrix[0]*px + Rotation_matrix[3]*py + Rotation_matrix[6]*pz;
         float ps1 = Rotation_matrix[1]*px + Rotation_matrix[4]*py + Rotation_matrix[7]*pz;
         float ps2 = Rotation_matrix[2]*px + Rotation_matrix[5]*py + Rotation_matrix[8]*pz;
 
-        // ================================================================
-        // 2. Offset камеры (Translation)
-        // ================================================================
+        // 2. Offset камеры
         ps0 += Translation[0];
         ps1 += Translation[1];
         ps2 += Translation[2];
 
-        // ================================================================
         // 3. Масштаб
-        // ================================================================
         ps0 *= Map_scale;
         ps1 *= Map_scale;
         ps2 *= Map_scale;
 
-        // ================================================================
-        // 4. Поворот кватернионом (ориентация робота в мире)
-        // ================================================================
+        // 4. Поворот кватернионом
         float rs0 = ww*ps0 + two*wy*ps2 - two*wz*ps1 + xx*ps0 + two*xy*ps1 + two*xz*ps2 - zz*ps0 - yy*ps0;
         float rs1 = two*xy*ps0 + yy*ps1 + two*yz*ps2 + two*wz*ps0 - zz*ps1 + ww*ps1 - two*wx*ps2 - xx*ps1;
         float rs2 = two*xz*ps0 + two*yz*ps1 + zz*ps2 - two*wy*ps0 - yy*ps2 + two*wx*ps1 - xx*ps2 + ww*ps2;
 
-        // ================================================================
         // 5. В индексы карты
-        // ================================================================
         int imx = __float2int_rd(rs0 + Map_center_X);
         int imy = __float2int_rd(rs1 + Map_center_Y);
         int imz = __float2int_rd(rs2 + Map_center_Z);
@@ -385,9 +387,7 @@ void rotate_ray_points_to_world(const int16_t *ray_points_cam,
             continue;
         }
 
-        // ================================================================
         // 6. Y-высота в мировых мм
-        // ================================================================
         float y_world_mm_f = (rs1 + (float)Map_center_Y) * 100.0f;
         int y_world_mm = __float2int_rd(y_world_mm_f);
         if (y_world_mm < 0) y_world_mm = 0;
@@ -1201,9 +1201,9 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     // ========================================================================
     uint16_t *dev_depth;
     rs2_intrinsics *dev_intrin;
-    int16_t  *dev_ray_points_cam;
     uint16_t *dev_ray_points_world;
     uint32_t *dev_local_counter;
+    unsigned long long *dev_ray_points_cam;
 
     result = cudaMalloc(&dev_depth, count * sizeof(uint16_t));
     //std::cout << "Stage 1 (malloc depth)" << std::endl;
@@ -1213,7 +1213,7 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     //std::cout << "Stage 2 (malloc intrin)" << std::endl;
     assert(result == cudaSuccess);
 
-    result = cudaMalloc(&dev_ray_points_cam, (size_t)total_voxels_frustum * 3 * sizeof(int16_t));
+    result = cudaMalloc(&dev_ray_points_cam, (size_t)total_voxels_frustum * sizeof(unsigned long long));
     //std::cout << "Stage 3 (malloc ray_points_cam, total_voxels=" << total_voxels << ")" << std::endl;
     assert(result == cudaSuccess);
 
@@ -1249,8 +1249,7 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     dim3 gridSize((intrin.width + blockSize.x - 1) / blockSize.x,
                   (intrin.height + blockSize.y - 1) / blockSize.y);
 
-    crop_depth_borders<<<gridSize, blockSize>>>(dev_depth, intrin.width, intrin.height,
-                                                 border_top, border_bottom, border_left, border_right);
+    crop_depth_borders<<<gridSize, blockSize>>>(dev_depth, intrin.width, intrin.height, border_top, border_bottom, border_left, border_right);
     result = cudaDeviceSynchronize();
     //std::cout << "Stage 9 (crop_depth_borders)" << std::endl;
     assert(result == cudaSuccess);
@@ -1258,15 +1257,14 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     // ========================================================================
     // ОБНУЛЯЕМ ray_points_cam ПЕРЕД DEPROJECT
     // ========================================================================
-    result = cudaMemset(dev_ray_points_cam, 0, (size_t)total_voxels_frustum * 3 * sizeof(int16_t));
+    result = cudaMemset(dev_ray_points_cam, 0xFF, (size_t)total_voxels_frustum * sizeof(unsigned long long));
     //std::cout << "Stage 10 (memset ray_points_cam)" << std::endl;
     assert(result == cudaSuccess);
 
     // ========================================================================
     // DEPROJECT + FRUSTUM BINNING (СК камеры)
     // ========================================================================
-    kernel_deproject_depth_cuda<<<numBlocks, RS2_CUDA_THREADS_PER_BLOCK>>>(
-        dev_ray_points_cam, dev_intrin, dev_depth, depth_scale);
+    kernel_deproject_depth_cuda<<<numBlocks, RS2_CUDA_THREADS_PER_BLOCK>>>(dev_ray_points_cam, dev_intrin, dev_depth, depth_scale);
     result = cudaDeviceSynchronize();
     //std::cout << "Stage 11 (kernel_deproject_depth_cuda)" << std::endl;
     assert(result == cudaSuccess);
@@ -1277,8 +1275,7 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
     // ========================================================================
     // ПОВОРОТ: СК камеры → СК карты
     // ========================================================================
-    rotate_ray_points_to_world<<<128, 128>>>(
-        dev_ray_points_cam, dev_ray_points_world, total_voxels_frustum, w, x, y, z);
+    rotate_ray_points_to_world<<<128, 128>>>(dev_ray_points_cam, dev_ray_points_world, total_voxels_frustum, w, x, y, z);
     result = cudaDeviceSynchronize();
     //std::cout << "Stage 12 (rotate_ray_points_to_world)" << std::endl;
     assert(result == cudaSuccess);
