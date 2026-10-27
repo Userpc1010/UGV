@@ -362,7 +362,7 @@ void dlio::OdomNode::getParams() {
   this->geo_Kq_ = 4.0;
   this->geo_Kab_ = 2.25;
   this->geo_Kgb_ = 1.0;
-  this->geo_abias_max_ = 5.0;
+  this->geo_abias_max_ = 16.0;
   this->geo_gbias_max_ = 0.5;
 
 //  ros::param::param<bool>("~dlio/verbose", this->verbose, true);

@@ -1005,8 +1005,6 @@ void Processor::odometry_lidar(odometry data)
 {
   odom = data;
 
-  first_start = true;
-
   if(!first_start)
   {
       last_pos_x = odom.x_pos;
@@ -1017,6 +1015,7 @@ void Processor::odometry_lidar(odometry data)
       filter_integrate_y = odom.y_pos;
       filter_integrate_z = odom.z_pos;
 
+      first_start = false;
   }
 }
 

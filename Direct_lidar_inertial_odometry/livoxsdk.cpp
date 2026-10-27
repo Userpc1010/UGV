@@ -40,12 +40,16 @@ LivoxSDK::LivoxSDK(const std::string config_path, QObject *parent)
 
 LivoxSDK::~LivoxSDK()
 {
+  is_running_ = false;
   mapping = nullptr;
   LivoxLidarSdkUninit();
   printf("Livox End!\n");
+  cv_pc_.notify_all();
+  cv_imu_.notify_all();
 
-  if(pcl_thread.joinable()) pcl_thread.detach();
-  if(pcl_thread.joinable()) imu_thread.detach();
+  if(pcl_thread.joinable()) pcl_thread.join();
+  if(imu_thread.joinable()) imu_thread.join();
+
 }
 
 void LivoxSDK::camsync(double time)
@@ -72,8 +76,7 @@ void LivoxSDK::callbackImu2(const ImuConst imu)
 
 void LivoxSDK::callbackPointCloud()
 {
-  nice(19);
-  while(1){
+  while(is_running_){
 
   std::unique_lock<std::mutex>lock(mutex);
 
@@ -88,8 +91,7 @@ void LivoxSDK::callbackPointCloud()
 
 void LivoxSDK::callbackImu()
 {
- nice(19);
- while(1){
+ while(is_running_){
 
  std::unique_lock<std::mutex>lock(mutex);
 
@@ -181,9 +183,6 @@ void LivoxSDK::ImuDataCallback(uint32_t handle, const uint8_t dev_type, LivoxLid
     if (data->data_type == kLivoxLidarImuData) {
 
         uint64_t timestamp = GetEthPacketTimestamp(handle, data->time_type, data->timestamp, sizeof(data->timestamp));
-
-        if(((timestamp - Last_upd) / 1000.0) < 2000 ) { Last_upd += 5000000; timestamp += 2000 - ((timestamp - Last_upd) / 1000.0); }
-        else Last_upd += 5000000;
 
         LivoxLidarImuRawPoint *p_point_data = (LivoxLidarImuRawPoint *)data->data;
 

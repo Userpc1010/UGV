@@ -74,6 +74,8 @@ private:
 
     static inline bool time_stabilized = false;
 
+    std::atomic<bool> is_running_{true};
+
     // Целевой сдвиг фазы: 11.5 мс = 11 500 000 наносекунд
     static inline const uint64_t TARGET_PHASE_NS = 11500000ULL;
 
