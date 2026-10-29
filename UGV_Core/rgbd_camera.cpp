@@ -9,10 +9,10 @@ extern "C"
 int init_frustum_cuda(const rs2_intrinsics &intrin);
 
 extern "C"
-void init_cuda_map(uint16_t **dev_voxels, uint8_t **dev_costmap);
+void init_cuda_map(uint16_t **dev_voxels, uint8_t **dev_costmap, unsigned int **dev_minmax);
 
 extern "C"
-void cleanup_cuda_map(uint16_t *dev_voxels, uint8_t *dev_costmap);
+void cleanup_cuda_map(uint16_t *dev_voxels, uint8_t *dev_costmap, unsigned int *dev_minmax);
 
 extern "C"
 void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter, uint16_t *dev_voxels, uint32_t total_voxels_frustum,
@@ -23,8 +23,11 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
                           const int16_t  *lidar_pcl,    uint32_t lidar_size);
 
 extern "C"
-void process_costmap_cuda(uint16_t *dev_voxels, uint8_t *dev_costmap, uint8_t *costmap_host);
-
+void process_costmap_cuda(uint16_t *dev_voxels, uint8_t *dev_costmap, uint8_t *costmap_host,
+                          unsigned int *dev_minmax,
+                          float *out_heightmap_packed,
+                          float *out_h_min, float *out_h_max,
+                          float *out_rover_height_m);
 
 uint32_t floatBitsToUint_memcpy(float f) {
     uint32_t u;
@@ -183,6 +186,7 @@ void Processor::Raycast (const uint16_t start[3], const uint16_t end[3], const u
 Processor::Processor(QObject *parent)
 {
     qRegisterMetaType< std::vector<std::vector<cv::Point2f>> >("std::vector<std::vector<cv::Point2f>>");
+    qRegisterMetaType<const float*>("const float*");
 
     connect(this, SIGNAL(ArucoTrackerOut(std::vector<std::vector<cv::Point2f>>)), this, SLOT(ArucoTrackerIn(std::vector<std::vector<cv::Point2f>>)));
 
@@ -210,6 +214,8 @@ Processor::Processor(QObject *parent)
     dev_voxels = nullptr;
     dev_costmap = nullptr;
     costmap = nullptr;
+    heightmap_packed = nullptr;
+    dev_minmax = nullptr;
 
    // Create the dictionary from the same dictionary the marker was generated.
 //   cv::aruco::Dictionary dir = cv::aruco::getPredefinedDictionary(cv::aruco::PredefinedDictionaryType(cv::aruco::DICT_4X4_50));
@@ -220,10 +226,12 @@ Processor::~Processor()
 {
  process_rgbd = false;
  pipe.stop();
- cleanup_cuda_map(dev_voxels, dev_costmap);
+ cleanup_cuda_map(dev_voxels, dev_costmap, dev_minmax);
  dev_voxels = nullptr;
  dev_costmap = nullptr;
+ dev_minmax = nullptr;
  if (costmap) { delete[] costmap; costmap = nullptr; }
+ if (heightmap_packed) { delete[] heightmap_packed; heightmap_packed = nullptr; }
  if (serialization_point) { free(serialization_point); serialization_point = nullptr; }
  if(ptr_guard_vertices_data){ ptr_guard_vertices_data = false; delete [] vertices_data;}
  if(ptr_guard_color_data){ptr_guard_color_data = false;  delete [] color_data;}
@@ -374,7 +382,9 @@ void Processor::point_cloud_lidar(const uint16_t * keyframe_pcl, uint32_t size_k
                              keyframe_pcl, size_keyframe,
                              lidar_pcl, size_pcl);
 
-        process_costmap_cuda(dev_voxels, dev_costmap, costmap);
+        float h_min = 0.0f, h_max = 1.5f, rover_height_m = 0.0f;
+
+        process_costmap_cuda(dev_voxels, dev_costmap, costmap, dev_minmax, heightmap_packed, &h_min, &h_max, &rover_height_m);
 
         // === Формирование массивов для визуализатора ===
         vertices_data = new GLfloat[world_counter]; ptr_guard_vertices_data = true;
@@ -387,9 +397,8 @@ void Processor::point_cloud_lidar(const uint16_t * keyframe_pcl, uint32_t size_k
         QImage img = colorizer->colorizeCostmap(costmap, 400, 400);
         if (state == 2) DisplayingCostMap(img, QQuaternion(odom.w, -odom.y, odom.z, -odom.x));
 
-        // === Визуализация вокселей ===
-        if (state == 0) emit DisplayingCubes(vertices_data, color_data, world_counter,
-                                              QQuaternion(odom.w, -odom.y, odom.z, -odom.x));
+        // === Визуализация heightmap ===
+        if (state == 0) emit DisplayingHeightMap(heightmap_packed, h_min, h_max, rover_height_m, QQuaternion(odom.w, -odom.y, odom.z, -odom.x));
 
         // === Планировщик ===
         state_lattice_->updateCostmapFromData(costmap);
@@ -920,11 +929,13 @@ void Processor::run()
 
    intrinsics_depth = cam_stream.as<rs2::video_stream_profile>().get_intrinsics();
 
-   init_cuda_map(&dev_voxels, &dev_costmap);
+    init_cuda_map(&dev_voxels, &dev_costmap, &dev_minmax);
 
    total_voxels_frustum = init_frustum_cuda(intrinsics_depth);
 
    costmap = new uint8_t [160000];   // CPU-копия costmap (остаётся)
+
+   heightmap_packed = new float[400 * 200];   // CPU-копия упакованного heightmap
 
    cv::Mat Color;
 

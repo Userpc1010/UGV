@@ -69,6 +69,8 @@ uint32_t world_counter;
  uint8_t  *dev_costmap;       // GPU-указатель на 2D costmap (1.6 МБ)
  float *serialization_point;  // CPU-копия списка индексов для визуализации
  uint8_t  *costmap;           // CPU-копия costmap (остаётся)
+ float *heightmap_packed;     // CPU-копия упакованного heightmap float[400*200]
+ unsigned int *dev_minmax;   // GPU-буфер для min/max heightmap
 
 private:
 
@@ -231,7 +233,7 @@ protected:
 
  void ArucoTrackerOut(std::vector<std::vector<cv::Point2f>> corners);
 
- void DisplayingCubes(GLfloat* vertices_buffer, GLfloat* color_buffer, unsigned long long counter, QQuaternion rotation);
+ void DisplayingHeightMap(const float *data, float min, float max, float targetHeight, QQuaternion rotation);
 
  void DrawCube(QVector3D pos);
 

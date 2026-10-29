@@ -13,7 +13,6 @@ SOURCES += \
     WidgetCostMap.cpp \
     WidgetLidar.cpp \
     costmap2d.cpp \
-        oglwidget.cpp \
     oglwidgetbase.cpp \
     pointrender.cpp \
         simpleobject3d.cpp \
@@ -21,14 +20,14 @@ SOURCES += \
     cube.cpp \
     cuberander.cpp \
     drawline.cpp \
-    multidrawline.cpp
+    multidrawline.cpp \
+    heightmaprenderer.cpp
 
 HEADERS += \
     WidgetCamera.h \
     WidgetCostMap.h \
     WidgetLidar.h \
     costmap2d.h \
-        oglwidget.h \
     oglwidgetbase.h \
     pointrender.h \
         simpleobject3d.h \
@@ -36,7 +35,8 @@ HEADERS += \
     cube.h \
     cuberander.h \
     drawline.h \
-    multidrawline.h
+    multidrawline.h \
+    heightmaprenderer.h
 
 # Default rules for deployment.
 #qnx: target.path = /tmp/$${TARGET}/bin

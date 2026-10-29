@@ -18,7 +18,7 @@
 #define Map_center_Z 199
 #define Map_scale 10.0f
 #define DEFAULT_ROBOT_Y 57
-#define ROBOT_HEIGHT 5
+#define ROBOT_HEIGHT 8
 
 // ============================================================================
 // Frustum binning parameters
@@ -1075,6 +1075,77 @@ __global__ void Convert_3D_voxels_map_to_2d_cost_map(const uint16_t* __restrict_
 }
 
 
+// ============================================================================
+// Упаковка heightmap float[400x400] -> packed float[400x200] (2x uint16 в float)
+// + редукция min/max по валидным ячейкам (uint16, мм)
+// Выход совместим с HeightMapRenderer::update_map и шейдером p_id==4
+// ============================================================================
+__global__ void pack_heightmap_minmax_kernel(
+    const float* __restrict__ heightmap,
+    float*       __restrict__ out_packed,
+    unsigned int* __restrict__ d_minmax)
+{
+    int texCol = blockIdx.x * blockDim.x + threadIdx.x;
+    int row    = blockIdx.y * blockDim.y + threadIdx.y;
+
+    unsigned int lmin = 0xFFFFFFFFu;
+    unsigned int lmax = 0u;
+
+    // Вместо return используем if
+    if (texCol < 200 && row < 400) {
+        int col0 = texCol * 2;
+        int col1 = col0 + 1;
+
+        float fa = heightmap[row * 400 + col0];
+        float fb = heightmap[row * 400 + col1];
+
+        if (!isfinite(fa) || fa < 0.0f || fa > 65534.0f) fa = -1.0f;
+        if (!isfinite(fb) || fb < 0.0f || fb > 65534.0f) fb = -1.0f;
+
+        uint16_t a_raw = (fa < 0.0f) ? 65535u : (uint16_t)fa;
+        uint16_t b_raw = (fb < 0.0f) ? 65535u : (uint16_t)fb;
+
+        uint32_t packed = ((uint32_t)a_raw << 16) | (uint32_t)b_raw;
+        out_packed[row * 200 + texCol] = __uint_as_float(packed);
+
+        if (a_raw != 65535u) { lmin = min(lmin, (unsigned int)a_raw); lmax = max(lmax, (unsigned int)a_raw); }
+        if (b_raw != 65535u) { lmin = min(lmin, (unsigned int)b_raw); lmax = max(lmax, (unsigned int)b_raw); }
+    }
+
+    __shared__ unsigned int sMin[16][16];
+    __shared__ unsigned int sMax[16][16];
+    sMin[threadIdx.y][threadIdx.x] = lmin;
+    sMax[threadIdx.y][threadIdx.x] = lmax;
+
+    __syncthreads();
+
+    // Редукция по X
+    for (int s = 8; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            if (sMin[threadIdx.y][threadIdx.x + s] < sMin[threadIdx.y][threadIdx.x])
+                sMin[threadIdx.y][threadIdx.x] = sMin[threadIdx.y][threadIdx.x + s];
+            if (sMax[threadIdx.y][threadIdx.x + s] > sMax[threadIdx.y][threadIdx.x])
+                sMax[threadIdx.y][threadIdx.x] = sMax[threadIdx.y][threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+    // Редукция по Y
+    for (int s = 8; s > 0; s >>= 1) {
+        if (threadIdx.y < s) {
+            if (sMin[threadIdx.y + s][threadIdx.x] < sMin[threadIdx.y][threadIdx.x])
+                sMin[threadIdx.y][threadIdx.x] = sMin[threadIdx.y + s][threadIdx.x];
+            if (sMax[threadIdx.y + s][threadIdx.x] > sMax[threadIdx.y][threadIdx.x])
+                sMax[threadIdx.y][threadIdx.x] = sMax[threadIdx.y + s][threadIdx.x];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0 && threadIdx.y == 0) {
+        atomicMin(&d_minmax[0], sMin[0][0]);
+        atomicMax(&d_minmax[1], sMax[0][0]);
+    }
+}
+
 void compute_layer_y(uint8_t arr[100], int8_t start)
 {
     int8_t count = 0;
@@ -1100,22 +1171,24 @@ void compute_layer_y(uint8_t arr[100], int8_t start)
 // ============================================================================
 
 extern "C" __host__
-void init_cuda_map(uint16_t **dev_voxels, uint8_t **dev_costmap)
+void init_cuda_map(uint16_t **dev_voxels, uint8_t **dev_costmap, unsigned int **dev_minmax)
 {
     cudaError_t result;
     result = cudaMalloc(dev_voxels, Map_length * sizeof(uint16_t)); assert(result == cudaSuccess);
     result = cudaMemset(*dev_voxels, 0, Map_length * sizeof(uint16_t)); assert(result == cudaSuccess);
     result = cudaMalloc(dev_costmap, Map_X * Map_Z); assert(result == cudaSuccess);
     result = cudaMemset(*dev_costmap, 0, Map_X * Map_Z); assert(result == cudaSuccess);
+    result = cudaMalloc(dev_minmax, 2 * sizeof(unsigned int)); assert(result == cudaSuccess);
     cudaDeviceSynchronize();
     std::cout << "[CUDA] init_cuda_map done" << std::endl;
 }
 
 extern "C" __host__
-void cleanup_cuda_map(uint16_t *dev_voxels, uint8_t *dev_costmap)
+void cleanup_cuda_map(uint16_t *dev_voxels, uint8_t *dev_costmap, unsigned int *dev_minmax)
 {
     if (dev_voxels)  cudaFree(dev_voxels);
     if (dev_costmap) cudaFree(dev_costmap);
+    if (dev_minmax)  cudaFree(dev_minmax);
     cudaDeviceSynchronize();
     std::cout << "[CUDA] cleanup_cuda_map done" << std::endl;
 }
@@ -1442,13 +1515,138 @@ void deproject_depth_cuda(float **serialization_point_1, uint32_t *world_counter
 
 
 // ============================================================================
+// ДЕБАГ: Выводит статистику по dev_heightmap (сырой), dev_heightmap_packed и rover
+// Вызывать раз в N кадров. Тяжелая (много printf) — только для отладки!
+// ============================================================================
+__global__ void debug_heightmap_kernel(
+    const float* __restrict__ dev_heightmap,        // 400x400, мм, -1 = unknown
+    const float* __restrict__ dev_heightmap_packed, // 400x200, packed 2xuint16
+    int robot_y,
+    float rover_height_m,
+    float h_min_scene,
+    float h_max_scene,
+    unsigned int h_min_u16,
+    unsigned int h_max_u16,
+    int frame_counter)
+{
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+    printf("\n========== [HEIGHTMAP DEBUG frame %d] ==========\n", frame_counter);
+    printf("ROVER: robot_y = %d, rover_height_m = %.4f (сцена)\n", robot_y, rover_height_m);
+    printf("NORMALIZATION: h_min = %.4f (u16=%u), h_max = %.4f (u16=%u), MM_TO_SCENE = 0.0065535\n",
+           h_min_scene, h_min_u16, h_max_scene, h_max_u16);
+
+    // --- 1. Статистика по сырому heightmap (float[400*400]) ---
+    int valid_count = 0, unknown_count = 0;
+    float fmin = 1e30f, fmax = -1e30f;
+    float sum = 0.0f;
+    int nan_count = 0, neg_except_minus_one = 0, huge_count = 0;
+
+    for (int i = 0; i < 400 * 400; i++) {
+        float h = dev_heightmap[i];
+        if (!isfinite(h)) { nan_count++; continue; }
+        if (h == -1.0f) { unknown_count++; continue; }
+        if (h < 0.0f) { neg_except_minus_one++; continue; }
+        if (h > 65534.0f) { huge_count++; continue; }
+        valid_count++;
+        if (h < fmin) fmin = h;
+        if (h > fmax) fmax = h;
+        sum += h;
+    }
+
+    printf("RAW HEIGHTMAP (float[400x400]):\n");
+    printf("  valid = %d, unknown = %d, nan = %d, neg(!=-1) = %d, huge = %d\n",
+           valid_count, unknown_count, nan_count, neg_except_minus_one, huge_count);
+    if (valid_count > 0) {
+        printf("  fmin = %.2f, fmax = %.2f, avg = %.2f\n", fmin, fmax, sum / valid_count);
+    }
+
+    // --- 2. Примеры из сырого heightmap: центр, углы, несколько случайных ---
+    auto print_raw = [&](const char* label, int x, int z) {
+        float h = dev_heightmap[z * 400 + x];
+        printf("  RAW[%s] (%d,%d) = %.2f\n", label, x, z, h);
+    };
+    print_raw("center",   199, 199);
+    print_raw("north",    199, 0);
+    print_raw("south",    199, 399);
+    print_raw("west",     0,   199);
+    print_raw("east",     399, 199);
+    print_raw("corner",   0,   0);
+
+    // --- 3. Статистика по упакованному heightmap (float[400*200]) ---
+    int packed_valid = 0, packed_unknown = 0;
+    unsigned int pmin = 0xFFFFFFFFu, pmax = 0;
+    int mismatches_from_raw = 0;
+
+    for (int row = 0; row < 400; row++) {
+        for (int tc = 0; tc < 200; tc++) {
+            float pf = dev_heightmap_packed[row * 200 + tc];
+            uint32_t packed = __float_as_uint(pf);
+            uint16_t a = (packed >> 16) & 0xFFFFu;
+            uint16_t b = packed & 0xFFFFu;
+
+            if (a != 65535u) { packed_valid++; if (a < pmin) pmin = a; if (a > pmax) pmax = a; }
+            else packed_unknown++;
+            if (b != 65535u) { packed_valid++; if (b < pmin) pmin = b; if (b > pmax) pmax = b; }
+            else packed_unknown++;
+
+            // Сверка с сырым
+            float ra = dev_heightmap[row * 400 + tc * 2];
+            float rb = dev_heightmap[row * 400 + tc * 2 + 1];
+            uint16_t ra_u16 = (ra < 0.0f) ? 65535u : (uint16_t)ra;
+            uint16_t rb_u16 = (rb < 0.0f) ? 65535u : (uint16_t)rb;
+            if (ra_u16 != a || rb_u16 != b) mismatches_from_raw++;
+        }
+    }
+
+    printf("PACKED HEIGHTMAP (float[400x200]):\n");
+    printf("  valid = %d, unknown = %d, mismatches_from_raw = %d\n",
+           packed_valid, packed_unknown, mismatches_from_raw);
+    if (pmin != 0xFFFFFFFFu) {
+        printf("  pmin = %u, pmax = %u (uint16, мм)\n", pmin, pmax);
+    }
+
+    // --- 4. Примеры из упакованного: центр и углы ---
+    auto print_packed = [&](const char* label, int x, int z) {
+        int tc = x / 2;
+        int parity = x % 2;
+        float pf = dev_heightmap_packed[z * 200 + tc];
+        uint32_t packed = __float_as_uint(pf);
+        uint16_t raw = (parity == 0) ? ((packed >> 16) & 0xFFFFu) : (packed & 0xFFFFu);
+        float scene_h = (raw == 65535u) ? -1.0f : (float)raw * 0.0065535f;
+        printf("  PACKED[%s] (%d,%d) raw=%u scene=%.4f\n", label, x, z, raw, scene_h);
+    };
+    print_packed("center", 199, 199);
+    print_packed("north",  199, 0);
+    print_packed("south",  199, 399);
+    print_packed("west",   0,   199);
+    print_packed("east",   399, 199);
+    print_packed("corner", 0,   0);
+
+    // --- 5. Ровер в сцене ---
+    printf("ROVER в сцене: %.4f, диапазон сцены [%.4f, %.4f]\n",
+           rover_height_m, h_min_scene, h_max_scene);
+    if (rover_height_m < h_min_scene) printf("  !!! ВНИМАНИЕ: ровер НИЖЕ h_min (визуально под картой)\n");
+    if (rover_height_m > h_max_scene) printf("  !!! ВНИМАНИЕ: ровер ВЫШЕ h_max (визуально над картой)\n");
+
+    printf("================================================\n\n");
+}
+
+
+// ============================================================================
 // Построение 2D costmap из 3D воксельной карты
 // ============================================================================
 
-
 extern "C"
 __host__
-void process_costmap_cuda(uint16_t *dev_voxels, uint8_t *dev_costmap, uint8_t *costmap_host)
+void process_costmap_cuda(uint16_t *dev_voxels,
+                          uint8_t  *dev_costmap,
+                          uint8_t  *costmap_host,
+                          unsigned int *dev_minmax,
+                          float    *out_heightmap_packed,   // [out] float[400*200]
+                          float    *out_h_min,              // [out] метры сцены
+                          float    *out_h_max,              // [out] метры сцены
+                          float    *out_rover_height_m)     // [out] метры сцены
 {
     cudaError_t result;
 
@@ -1500,6 +1698,11 @@ void process_costmap_cuda(uint16_t *dev_voxels, uint8_t *dev_costmap, uint8_t *c
     result = cudaMemcpy(&robot_y, dev_robot_y, sizeof(int), cudaMemcpyDeviceToHost);
     assert(result == cudaSuccess);
 
+    const float MM_MAX = Map_Y * (100 - 1); // 9900.0f
+    int y_mm_raw = robot_y * 100;
+    int y_mm_inv = MM_MAX - y_mm_raw;
+    *out_rover_height_m = (float)y_mm_inv * 0.0065535f;
+
     uint8_t layer_y[100];
     compute_layer_y(layer_y, robot_y);
 
@@ -1532,6 +1735,62 @@ void process_costmap_cuda(uint16_t *dev_voxels, uint8_t *dev_costmap, uint8_t *c
     result = cudaDeviceSynchronize();
     assert(result == cudaSuccess);
     //std::cout << "Costmap Stage 3 (heightmap)" << std::endl;
+
+    // ========================================================================
+    // Шаг 3.5: Упаковка heightmap (2xuint16 в float) + min/max
+    // ========================================================================
+    float* dev_heightmap_packed = nullptr;
+    result = cudaMalloc(&dev_heightmap_packed, 400 * 200 * sizeof(float));
+    assert(result == cudaSuccess);
+
+    unsigned int init_mm[2] = { 0xFFFFFFFFu, 0u };
+    result = cudaMemcpy(dev_minmax, init_mm, 2 * sizeof(unsigned int), cudaMemcpyHostToDevice);
+    assert(result == cudaSuccess);
+
+    dim3 packBlock(16, 16);
+    dim3 packGrid((200 + 15) / 16, (400 + 15) / 16);
+
+    pack_heightmap_minmax_kernel<<<packGrid, packBlock>>>(dev_heightmap, dev_heightmap_packed, dev_minmax);
+    result = cudaDeviceSynchronize();
+    assert(result == cudaSuccess);
+
+    // Копируем упакованный heightmap обратно на CPU
+    result = cudaMemcpy(out_heightmap_packed, dev_heightmap_packed, 400 * 200 * sizeof(float), cudaMemcpyDeviceToHost);
+    assert(result == cudaSuccess);
+    cudaFree(dev_heightmap_packed);
+
+
+    unsigned int h_minmax_u16[2] = { 0xFFFFFFFFu, 0u };
+    result = cudaMemcpy(h_minmax_u16, dev_minmax, 2 * sizeof(unsigned int), cudaMemcpyDeviceToHost);
+    assert(result == cudaSuccess);
+
+    const float MM_TO_SCENE = 0.0065535f;
+    if (h_minmax_u16[0] == 0xFFFFFFFFu) {
+        *out_h_min = 0.0f;
+        *out_h_max = 1.5f;
+      } else {
+        *out_h_min = (float)h_minmax_u16[0] * MM_TO_SCENE;
+        *out_h_max = (float)h_minmax_u16[1] * MM_TO_SCENE;
+        if (*out_h_max - *out_h_min < 0.05f) *out_h_max = *out_h_min + 0.5f;
+      }
+
+    // === DEBUG: раз в 100 кадров выводим статистику ===
+       static int debug_frame_counter = 0;
+        debug_frame_counter++;
+        if (debug_frame_counter % 100 == 0) {
+            debug_heightmap_kernel<<<1, 1>>>(
+                dev_heightmap,
+                dev_heightmap_packed,
+                robot_y,
+                *out_rover_height_m,
+                *out_h_min,
+                *out_h_max,
+                h_minmax_u16[0],
+                h_minmax_u16[1],
+                debug_frame_counter);
+            cudaDeviceSynchronize();
+        }
+    // ================================================
 
     // ========================================================================
     // Шаг 4: Slope

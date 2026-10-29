@@ -116,7 +116,7 @@ MainWindow::MainWindow(QWidget *parent) :
 
     connect(processor->state_lattice_, SIGNAL(planningFinished(bool, const Path&, const std::vector<std::tuple<float, float, float>>&, double)), controller, SLOT(onPlanningFinished(bool, const Path&, const std::vector<std::tuple<float, float, float>>&, double)));
 
-    connect(processor, SIGNAL(DisplayingCubes(GLfloat*, GLfloat*, unsigned long long, QQuaternion)),                                             widgetCamera, SLOT (DisplayingCubes(GLfloat*, GLfloat*, unsigned long long, QQuaternion)));
+    connect(processor, SIGNAL(DisplayingHeightMap(const float*, float, float, float, QQuaternion)),                                              widgetCamera, SLOT (DisplayingHeightMap(const float*, float, float, float, QQuaternion)));
 
     connect(processor, SIGNAL(DisplayingCostMap(QImage, QQuaternion)),                                                                           widgetCostMap, SLOT(DisplayingCostMap(QImage, QQuaternion)));
 

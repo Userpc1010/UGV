@@ -1,12 +1,12 @@
 #include "WidgetCamera.h"
 #include "camera_3d.h"
-#include "cuberander.h"
+#include "heightmaprenderer.h"
 #include "multidrawline.h"
 #include "cube.h"
 
 WidgetCamera::WidgetCamera(QWidget *parent)
     : OGLWidgetBase(parent)
-    , m_CubeRander(new CubeRander())
+    , m_HeightMap(new HeightMapRenderer())
     , m_Aruco_mobile(new Cube())
     , m_cube(new Cube())
     , m_MultiLineRender(new MultiDrawLine())
@@ -15,7 +15,7 @@ WidgetCamera::WidgetCamera(QWidget *parent)
 
 WidgetCamera::~WidgetCamera()
 {
-    delete m_CubeRander;
+    delete m_HeightMap;
     delete m_Aruco_mobile;
     delete m_cube;
     delete m_MultiLineRender;
@@ -26,22 +26,23 @@ void WidgetCamera::initializeSpecific()
     m_Aruco_mobile->initCube(1.0f, QImage(":/Aruco/4x4_1000-47.png"));
     m_Aruco_mobile->Invisible_AllCube(true);
     m_Aruco_mobile->setApplyMapOffset(false);
-    m_CubeRander->init_fast();
+    m_HeightMap->init_fast();
 }
 
 void WidgetCamera::paintSpecific()
 {
-    m_CubeRander->draw(&m_Program, function, m_camera->GetPositionCamera());
+    m_HeightMap->draw(&m_Program, function, m_camera->GetPositionCamera());
     m_Aruco_mobile->draw(&m_Program, function);
     m_cube->draw(&m_Program, function);
     m_MultiLineRender->draw_lines(&m_Program, function);
 }
 
-void WidgetCamera::DisplayingCubes(GLfloat* vertices_buffer, GLfloat* color_buffer,
-                                  unsigned long long counter, QQuaternion rotation)
+
+void WidgetCamera::DisplayingHeightMap(const float* data,  float min, float max, float targetHeight, QQuaternion rotation)
 {
-    m_CubeRander->translate(vertices_buffer, color_buffer, counter);
+    m_HeightMap->update_map(data, min, max);
     m_Rover->rotate(rotation);
+    m_Rover->translate(QVector3D(0.0f, targetHeight, 0.0f));
     update();
 }
 

@@ -89,6 +89,10 @@ void CubeRander::draw(QOpenGLShaderProgram *program, QOpenGLFunctions_4_5_Core *
 {
     if(!m_VertexBuffer.isCreated() || !m_IndexBuffer.isCreated() || !m_AttributePositionBuffer.isCreated() || !m_AttributeColorBuffer.isCreated() ) return;
 
+    QMatrix4x4 modelMatrix;
+    modelMatrix.setToIdentity();
+    program->setUniformValue("u_modelMatrix", modelMatrix);
+
     program->setUniformValue("r_id", 1);
     program->setUniformValue("p_id", 1);
     program->setUniformValue("u_apply_map_offset", 0);

@@ -5,7 +5,7 @@
 #include <QQuaternion>
 
 class Cube;
-class CubeRander;
+class HeightMapRenderer;
 class MultiDrawLine;
 
 
@@ -18,8 +18,7 @@ public:
     ~WidgetCamera();
 
 public slots:
-    void DisplayingCubes(GLfloat* vertices_buffer, GLfloat* color_buffer,
-                        unsigned long long counter, QQuaternion rotation);
+    void DisplayingHeightMap(const float* data, float min, float max, float targetHeight,  QQuaternion rotation);
     void DrawAruco(QVector3D pos);
     void Invisible_Aruco(bool invisible);
     void Drone_scale(float s);
@@ -37,7 +36,7 @@ protected:
 //    void onMousePress(QMouseEvent *event);
 
 private:
-    CubeRander* m_CubeRander;
+    HeightMapRenderer* m_HeightMap;
     Cube* m_Aruco_mobile;
     Cube *m_cube;
     MultiDrawLine *m_MultiLineRender;

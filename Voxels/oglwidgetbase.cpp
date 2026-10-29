@@ -10,9 +10,9 @@ OGLWidgetBase::OGLWidgetBase(QWidget *parent)
     : QOpenGLWidget(parent)
      , m_mapOffset(0, 0, 0)  // Инициализируем нулевым смещением
 {
-    init_pos = QVector3D(199.0f, -54.0f, -199.0f);
+    init_pos = QVector3D(0.0f, 0.0f, 0.0f);
     function = new QOpenGLFunctions_4_5_Core();
-    m_camera = new Camera_3D(init_pos);
+    m_camera = new Camera_3D(init_pos * -5.0f);
     m_Rover = new SimpleObject3D();
 }
 
