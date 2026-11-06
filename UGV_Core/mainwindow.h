@@ -12,7 +12,6 @@
 #include "quadbike_controller.h"
 #include "livoxsdk.h"
 #include "odom.h"
-#include "data.h"
 #include <opencv4/opencv2/opencv.hpp>
 
 namespace Ui {

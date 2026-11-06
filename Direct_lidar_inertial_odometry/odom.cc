@@ -12,14 +12,6 @@
 
 #include "odom.h"
 
-#define Map_X 400
-#define Map_Y 100
-#define Map_Z 400
-#define Map_center_X 199
-#define Map_center_Y 49
-#define Map_center_Z 199
-#define Map_scale 10.0f
-
 dlio::OdomNode::OdomNode()  {
 
   this->getParams();
@@ -433,8 +425,6 @@ void dlio::OdomNode::publishToROS(pcl::PointCloud<PointType>::ConstPtr published
 
                c = GetColor(this->submap_cloud->points[i].intensity, min_map, max_map);
 
-               //если вдруг захочется покрасить кубик
-
                color_data_Map[i * 3] = c.r;
                color_data_Map[i * 3 + 1] = c.g;
                color_data_Map[i * 3 + 2] = c.b;
@@ -496,9 +486,13 @@ void dlio::OdomNode::publishCloud(pcl::PointCloud<PointType>::ConstPtr published
 
      for (uint32_t i = 0; i < size; i++)
      {
-       current_scan_pcl_data_lidar[i * 3] = -((current_scan->points[i].y - this->odom.y_pos) * Map_scale) + Map_center_X;
-       current_scan_pcl_data_lidar[i * 3 + 1] = -((current_scan->points[i].z - this->odom.z_pos) * Map_scale) + Map_center_Y;
-       current_scan_pcl_data_lidar[i * 3 + 2] = ((current_scan->points[i].x - this->odom.x_pos) * Map_scale) + Map_center_Z;
+//       current_scan_pcl_data_lidar[i * 3] = current_scan->points[i].x - this->odom.x_pos;
+//       current_scan_pcl_data_lidar[i * 3 + 1] = current_scan->points[i].y - this->odom.y_pos;
+//       current_scan_pcl_data_lidar[i * 3 + 2] = current_scan->points[i].z - this->odom.z_pos;
+
+         current_scan_pcl_data_lidar[i * 3]     = (int16_t)((current_scan->points[i].x - this->odom.x_pos) * 1000.0f);
+         current_scan_pcl_data_lidar[i * 3 + 1] = (int16_t)((current_scan->points[i].y - this->odom.y_pos) * 1000.0f);
+         current_scan_pcl_data_lidar[i * 3 + 2] = (int16_t)((current_scan->points[i].z - this->odom.z_pos) * 1000.0f);
      }
      emit point_cloud_lidar(keyframe_pcl_data_lidar, keyframe_size, current_scan_pcl_data_lidar, size);
 
@@ -524,13 +518,15 @@ void dlio::OdomNode::publishKeyframe(std::pair<std::pair<Eigen::Vector3f, Eigen:
         if(ptr_guard_keyframe_pcl_data_lidar){ptr_guard_keyframe_pcl_data_lidar = false; delete [] keyframe_pcl_data_lidar;}
 
 
-        keyframe_pcl_data_lidar = new uint16_t [3 * size]; ptr_guard_keyframe_pcl_data_lidar = true;
+        keyframe_pcl_data_lidar = new int16_t [3 * size]; ptr_guard_keyframe_pcl_data_lidar = true;
 
         for (uint32_t i = 0; i < size; i++)
         {
-            keyframe_pcl_data_lidar[i * 3] = -((kf.second->points[i].y - kf.first.first[1]) * Map_scale) + Map_center_X;
-            keyframe_pcl_data_lidar[i * 3 + 1] = -((kf.second->points[i].z - kf.first.first[2]) * Map_scale) + Map_center_Y;
-            keyframe_pcl_data_lidar[i * 3 + 2] = ((kf.second->points[i].x - kf.first.first[0]) * Map_scale) + Map_center_Z;
+
+           keyframe_pcl_data_lidar[i * 3]     = (int16_t)((kf.second->points[i].x - kf.first.first[0]) * 1000.0f); // X (мм)
+           keyframe_pcl_data_lidar[i * 3 + 1] = (int16_t)((kf.second->points[i].y - kf.first.first[1]) * 1000.0f); // Y (мм)
+           keyframe_pcl_data_lidar[i * 3 + 2] = (int16_t)((kf.second->points[i].z - kf.first.first[2]) * 1000.0f); // Z (высота, мм)
+
         }
         keyframe_size = size;
         }
@@ -541,13 +537,13 @@ void dlio::OdomNode::publishKeyframe(std::pair<std::pair<Eigen::Vector3f, Eigen:
             if(ptr_guard_keyframe_pcl_data_lidar){ptr_guard_keyframe_pcl_data_lidar = false; delete [] keyframe_pcl_data_lidar;}
 
 
-            keyframe_pcl_data_lidar = new uint16_t [3 * size]; ptr_guard_keyframe_pcl_data_lidar = true;
+            keyframe_pcl_data_lidar = new int16_t [3 * size]; ptr_guard_keyframe_pcl_data_lidar = true;
 
             for (uint32_t i = 0; i < size; i++)
             {
-                keyframe_pcl_data_lidar[i * 3] = -((kf.second->points[i].y - kf.first.first[1]) * Map_scale) + Map_center_X;
-                keyframe_pcl_data_lidar[i * 3 + 1] = -((kf.second->points[i].z - kf.first.first[2]) * Map_scale) + Map_center_Y;
-                keyframe_pcl_data_lidar[i * 3 + 2] = ((kf.second->points[i].x - kf.first.first[0]) * Map_scale) + Map_center_Z;
+                keyframe_pcl_data_lidar[i * 3]     = (int16_t)((kf.second->points[i].x - kf.first.first[0]) * 1000.0f); // X (мм)
+                keyframe_pcl_data_lidar[i * 3 + 1] = (int16_t)((kf.second->points[i].y - kf.first.first[1]) * 1000.0f); // Y (мм)
+                keyframe_pcl_data_lidar[i * 3 + 2] = (int16_t)((kf.second->points[i].z - kf.first.first[2]) * 1000.0f); // Z (высота, мм)
             }
 
             keyframe_size = size;

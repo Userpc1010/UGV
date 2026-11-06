@@ -52,7 +52,7 @@ vec3 unpack_position(float packed_float) {
 
 // Радужный градиент высот для карты
 vec3 rainbow(float t) {
-    t = clamp(t, 0.0, 1.0);
+     t = t * 0.5 + 0.5;
     float h = t * 5.0 + 1.0;
     int i = int(floor(h));
     float f = h - float(i);
@@ -75,33 +75,32 @@ void main(void)
 
     // --- КАРТА ВЫСОТ ---
     if (p_id == 4) {
-        // Чтение упакованного float (два uint16 в одном)
+        // Чтение упакованного float (два int16_t в одном)
         float packed = texture2D(u_heightTexture, a_textcoord).r;
         uint p = floatBitsToUint(packed);
 
-        // Выбор нужных 16 бит в зависимости от четности столбца вершины
+        // Выбор нужных 16 бит (int16_t, знаковый)
         uint raw = (a_parity < 0.5) ? ((p >> 16) & 0xFFFFu) : (p & 0xFFFFu);
-        v_unknown = (raw == 65535u) ? 1.0 : 0.0;
+        int h_mm = int(raw);
+        if (h_mm >= 32768) h_mm -= 65536;   // знаковое приведение
 
-        // Перевод высоты из миллиметров в условные метры сцены
-        float h = (raw == 65535u) ? 0.0 : float(raw) * 0.0065535f;
+        v_unknown = (h_mm == -32768) ? 1.0 : 0.0;
 
-        // Трансформация позиции вершины в мировые координаты с учетом высоты рельефа
+        float h = (h_mm == -32768) ? 0.0 : float(h_mm) * 0.005f;
+
+
+        // Трансформация
         vec4 worldPos = u_modelMatrix * a_position;
         worldPos.y += h;
         worldPos.xyz += map_off;
-
-        // Финальная экранная позиция вершины
         gl_Position = u_projectionMatrix * u_viewMatrix * worldPos;
-
-        // позиция вершины в пространстве вида камеры
         v_position = u_viewMatrix * worldPos;
 
-        // Расчет цвета вершины на основе градиента
-        float t = (u_hMax > u_hMin) ? ((h - u_hMin) / (u_hMax - u_hMin)) : 0.0;
+        // Цвет
+        float h_color = h / 5.0f;
+        float t01 = (u_hMax > u_hMin) ? ((h_color - u_hMin) / (u_hMax - u_hMin)) : 0.0;
+        float t = t01 * 2.0 - 1.0;  // [0, 1] -> [-1, 1]
         v_color = (u_wire == 1) ? vec3(0.0, 0.0, 0.0) : rainbow(t);
-
-        // Заглушка нормали (карта пересчитает её сама во фрагментном шейдере через dFdx/dFdy)
         v_normal = vec3(0.0, 1.0, 0.0);
     }
 

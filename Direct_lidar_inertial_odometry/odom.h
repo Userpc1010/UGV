@@ -44,7 +44,7 @@ public slots:
 
 signals:
 
-  void point_cloud_lidar (const uint16_t * keyframe_pcl, uint32_t size_keyframe, const int16_t * lidar_pcl, uint32_t size_pcl);
+  void point_cloud_lidar (const int16_t * keyframe_pcl, uint32_t size_keyframe, const int16_t * lidar_pcl, uint32_t size_pcl);
 
   void odometry_lidar (odometry data);
   void DisplayingPoint(GLfloat* vertices_buffer, GLfloat* color_buffer, unsigned long long counter, QQuaternion rotation, QVector3D translation);
@@ -147,7 +147,7 @@ private:
   GLfloat * color_data_Map;
   bool ptr_guard_color_data_Map = false;
 
-  uint16_t * keyframe_pcl_data_lidar;
+  int16_t * keyframe_pcl_data_lidar;
   bool ptr_guard_keyframe_pcl_data_lidar = false;
   int16_t * current_scan_pcl_data_lidar;
   bool ptr_guard_current_scan_pcl_data_lidar = false;

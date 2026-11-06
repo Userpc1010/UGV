@@ -6,10 +6,7 @@
 #include <librealsense2/rs.hpp> // Include RealSense Cross Platform API
 #include <librealsense2-gl/rs_processing_gl.hpp> // Include GPU-Processing API
 #include <librealsense2/rsutil.h>
-#include "oglwidget.h"
 #include "LivoxData.hpp"
-#include "data.h"
-#include "CostmapColorizer.h"
 #include "nav2_costmap_2d/raytrace_line_2d.hpp"
 #include "statelattice.h"
 #include <opencv2/core.hpp>
@@ -34,13 +31,25 @@
 #define Quat_TWOPI 6.283185307179586476925286766559f
 #define Quat_TODEG(x) ((x) * 57.2957796f)
 
-#define Map_length 16000000
+#define MAP_CELL_N 400
+#define MAP_CELLS  160000  // 400 * 400
+#define MAP_LAYERS 7
+
+// Индексы слоёв в dev_elevation_map (каждый слой — 400x400 float)
+#define L_HEIGHT      0   // Высота (Z в DLIO)
+#define L_VARIANCE    1   // Дисперсия (для Калмана)
+#define L_IS_VALID    2   // Флаг валидности (1.0 = валидно)
+#define L_TRAVERS     3   // Проходимость (0..1)
+#define L_TIME        4   // Время с последнего обновления
+#define L_UPPER_BOUND 5   // Верхняя граница (для нависающих препятствий)
+#define L_IS_UPPER    6   // Флаг: 1.0 = граница, 0.0 = земля
+
+// Оставляем для costmap и min/max
 #define Map_X 400
-#define Map_Y 100
-#define Map_Z 400
-#define Map_center_X 199
-#define Map_center_Y 49
-#define Map_center_Z 199
+#define Map_Y 400
+#define Map_center_X 200
+#define Map_center_Y 200
+
 #define Map_scale 10.0f
 
 typedef struct {
@@ -61,16 +70,16 @@ public:
 
  std::atomic<bool> lattice_planning_in_progress_{false};
 
-CostmapColorizer * colorizer;
-
-uint32_t world_counter;
-
- uint16_t  *dev_voxels;        // GPU-указатель на воксельную карту (16 МБ)
+ float* dev_elevation_map;    // [7][400][400] — основная 2.5D карта
+ float* dev_new_map;          // [7][400][400] — буфер для atomicAdd (Калман)
+ float* dev_normal_map;       // [3][400][400] — нормали поверхности
+ float* dev_error;            // [1] — сумма ошибок для drift compensation
+ float* dev_error_cnt;        // [1] — счётчик точек для drift compensation
  uint8_t  *dev_costmap;       // GPU-указатель на 2D costmap (1.6 МБ)
- float *serialization_point;  // CPU-копия списка индексов для визуализации
  uint8_t  *costmap;           // CPU-копия costmap (остаётся)
  float *heightmap_packed;     // CPU-копия упакованного heightmap float[400*200]
- unsigned int *dev_minmax;   // GPU-буфер для min/max heightmap
+ float * dev_shift_temp;      // Временный буфер для сдига карты
+ uint32_t* costmap_rgba;     // CPU-копия RGBA для QImage
 
 private:
 
@@ -107,42 +116,21 @@ private:
 
  // Declare object that handles camera pose calculations
 
- const int zero = 0;
-
  odometry odom;
 
- int32_t total_offset_x = 0;
- int32_t total_offset_y = 0;
- int32_t total_offset_z = 0;
+ // Центр карты в мировых координатах (аналог self.center в elevation_mapping_cupy)
+ float center_x = 0.0f;
+ float center_y = 0.0f;
+ float center_z = 0.0f;
 
- int32_t last_sent_offset_x = 0;
- int32_t last_sent_offset_y = 0;
- int32_t last_sent_offset_z = 0;
-
- double accumulated_dx;
- double accumulated_dy;
- double accumulated_dz;
-
- double filter_integrate_x = 0.0;
- double filter_integrate_y = 0.0;
- double filter_integrate_z = 0.0;
-
- double filter_wegiht_x = 0.9;
- double filter_wegiht_y = 0.9;
- double filter_wegiht_z = 0.5;
-
- double last_pos_x;
- double last_pos_y;
- double last_pos_z;
-
- float pitch = 0.0f, roll= 0.0f, yaw = 0.0f;
+ float lpf_x = 0.0f, lpf_y = 0.0f, lpf_z = 0.0f;
+ float lpf_qw = 1.0f, lpf_qx = 0.0f, lpf_qy = 0.0f, lpf_qz = 0.0f;
+ bool lpf_init = false;
 
  // Last timestamp we visualized at
  double last_visualization_timestamp;
 
  bool process_rgbd;
-
- bool first_start = true;   //First Start True!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
  double cam_offset_ms = 0.0;
 
@@ -171,17 +159,6 @@ private:
 
   uint8_t state = 0;
 
-  uint32_t total_voxels_frustum = 0;
-
-  GLfloat * vertices_data;
-  bool ptr_guard_vertices_data = false;
-  GLfloat * color_data;
-  bool ptr_guard_color_data = false;
-
-  QVector3D m_accumulatedOffset;  // Накопленное смещение
-
-  QVector3D m_lastMapOffset;      // Последнее отправленное смещение
-
   // === Буфер синхронизированного кадра камеры (RGB-D) ===
   std::mutex imu_mutex;
   std::mutex depth_mutex;
@@ -195,29 +172,7 @@ private:
 
 private:
 
- void IMU_Get_Euler_Angle(Quat buff);
-
- void Raycast (const uint16_t start[3], const uint16_t end[3], const uint16_t min[3], const uint16_t max[3], std::vector<XYZ>* output);
-
- int16_t signum(int16_t x);
-
- float mod(float value, float modulus);
-
- float intbound(float s, float ds);
-
- COLOUR GetColour(float v,float vmin,float vmax);
-
- COLOUR JetColor(float v,float vmin,float vmax);
-
- uint32_t get_value (const uint16_t x, const uint16_t y, const uint16_t z);
-
- double expRunningAverage(double &newVal, double &filVal, const double &wegiht);
-
- void Finding_start_end_of_the_map (float target_pos_x, float target_pos_y, float target_pos_z);
-
  void Finding_start_end_of_the_map_2d (float target_pos_x, float target_pos_y, float target_yaw);
-
- rs2_vector interpolateMeasure(const double target_time, const rs2_vector current_data, const double current_time, const rs2_vector prev_data, const double prev_time);
 
 protected:
 
@@ -235,23 +190,15 @@ protected:
 
  void DisplayingHeightMap(const float *data, float min, float max, float targetHeight, QQuaternion rotation);
 
- void DrawCube(QVector3D pos);
-
  void updateMapOffset(QVector3D offset);
 
- void grab_imu (rs2_vector v_gyro_data, double v_gyro_timestamp,rs2_vector v_accel_data, double v_accel_timestamp);
-
- void grab_stereo_camera(cv::Mat im, cv::Mat imRight, double timestamp, uint16_t width_img, uint16_t height_img);
-
- void input_track (double timestamp);
+ void DrawCube(QVector3D pos);
 
  void camsync(double time);
 
-// void rotation (QQuaternion rotation);
-
 public slots:
 
-   void point_cloud_lidar (const uint16_t * keyframe_pcl, uint32_t size_keyframe, const int16_t * lidar_pcl, uint32_t size_pcl);
+   void point_cloud_lidar (const int16_t * keyframe_pcl, uint32_t size_keyframe, const int16_t * lidar_pcl, uint32_t size_pcl);
 
    void ArucoTrackerIn (std::vector<std::vector<cv::Point2f>> corners);
 

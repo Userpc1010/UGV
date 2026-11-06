@@ -106,7 +106,7 @@ MainWindow::MainWindow(QWidget *parent) :
 
     connect(this, SIGNAL(destroyed(QObject*)),                                                                                                   thread_Processor, SLOT(quit()));
 
-    connect(&SDK->Node, SIGNAL(point_cloud_lidar(const uint16_t*, uint32_t, const int16_t*, uint32_t)),                                          processor, SLOT(point_cloud_lidar(const uint16_t*, uint32_t, const int16_t*, uint32_t)));
+    connect(&SDK->Node, SIGNAL(point_cloud_lidar(const int16_t*, uint32_t, const int16_t*, uint32_t)),                                          processor, SLOT(point_cloud_lidar(const int16_t*, uint32_t, const int16_t*, uint32_t)));
 
     connect(&SDK->Node, SIGNAL(odometry_lidar(odometry)),                                                                                        processor,SLOT(odometry_lidar(odometry)));
 

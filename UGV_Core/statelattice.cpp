@@ -9,7 +9,7 @@ StateLattice::StateLattice(QObject* parent) : QObject(parent)
     // Инициализация параметров по умолчанию
     costmap_config_.resolution = Map_scale / 100.0f;
     costmap_config_.width = Map_X;
-    costmap_config_.height = Map_Z;
+    costmap_config_.height = Map_Y;
     costmap_config_.origin_x = 0.0f;  // Центрируем карту
     costmap_config_.origin_y = 0.0f;
     costmap_config_.robot_radius = 3.0f;

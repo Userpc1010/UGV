@@ -132,8 +132,6 @@ private:
 
     uint8_t state = 0;
 
-    Timer timer_;
-
 //    uint32_t last_imu_cbk = 0;
 
 //    uint32_t last_pcl_cbk = 0;

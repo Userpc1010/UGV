@@ -31,22 +31,23 @@ void HeightMapRenderer::init_fast()
     for (int row = 0; row < kGridSize - 1; ++row) {
         for (int col = 0; col < kGridSize - 1; ++col) {
 
-            // Углы квада (сжатые к центру на величину gap)
+            // col -> X, row -> Z
             float x0 = -half + col * step + gap;
             float x1 = -half + (col + 1) * step - gap;
             float z0 =  half - row * step - gap;
             float z1 =  half - (row + 1) * step + gap;
 
-            // UV координаты оставляем как были (нам они нужны для текстуры высот)
-            float u0 = (float(col / 2) + 0.5f) / float(kTexW);
+            // UV для упаковки (col/2 — потому что 2 высоты в одном текселе)
+            float u0 = (float(col / 2) + 0.5f) / float(kTexW);       // 200
             float u1 = (float((col + 1) / 2) + 0.5f) / float(kTexW);
-            float v0 = (float(row) + 0.5f) / float(kTexH);
+            float v0 = (float(row) + 0.5f) / float(kTexH);           // 400
             float v1 = (float(row + 1) + 0.5f) / float(kTexH);
+
+            // parity: 0 для четного col, 1 для нечетного
             float p0 = float(col % 2);
             float p1 = float((col + 1) % 2);
 
-            // 6 вершин (2 треугольника) для сжатого квада
-            // Ось Y = 0, высота добавится в шейдере
+            // Порядок вершин: (x0,z0), (x1,z0), (x0,z1), (x1,z0), (x1,z1), (x0,z1)
             float quad[6][6] = {
                 { x0, initheight, z0, u0, v0, p0 },
                 { x1, initheight, z0, u1, v0, p1 },

@@ -1,6 +1,5 @@
 #ifndef CUBE_H
 #define CUBE_H
-#include "transformational.h"
 #include "simpleobject3d.h"
 #include <QQuaternion>
 #include <QVector3D>

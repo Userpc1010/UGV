@@ -1,7 +1,6 @@
 #ifndef QUADBIKE_CONTROLLER_H
 #define QUADBIKE_CONTROLLER_H
 
-#include "data.h"
 #include <protocol.h>
 #include "rgbd_camera.h"
 #include <QObject>
@@ -19,6 +18,32 @@
 
 // MPPI
 #include "mppi-generic.h"
+
+// Режимы работы (как на STM32)
+typedef enum {
+    CTRL_MODE_MANUAL = 0,
+    CTRL_MODE_MPPI = 1,
+    CTRL_MODE_VPC = 2
+} ctrl_mode_t;
+
+typedef struct telemetry
+{
+ double Vel_X = 0.0;
+ double Vel_Y = 0.0;
+ double Vel_Z = 0.0;
+
+ double X = 0.0;
+ double Y = 0.0;
+ double Z = 0.0;
+
+ float pitch = 0.0f, roll= 0.0f, yaw = 0.0f;
+
+ double target_X = 0.0, target_Y = 0.0, target_Z = 0.0;
+
+ float course = 0.0f;
+ float target_course = 0.0f;
+
+} GUI_telem;
 
 class quadbike_controller : public QObject
 {
