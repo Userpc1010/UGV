@@ -56,7 +56,7 @@ Eigen::Vector3f WidgetCostMap::getPlaneCoordinatesFromMouse(const QVector2D& mou
 {
    // Используем существующий метод, но переименуем для ясности
    QVector3D p = screenCoordsToPlaneCoords(mousePos);
-   return Eigen::Vector3f(p.x(), p.y(), p.z());
+   return Eigen::Vector3f(p.x(), -p.z(), p.y());
 }
 
 void WidgetCostMap::onMousePress(QMouseEvent *event)
@@ -72,7 +72,8 @@ void WidgetCostMap::onMousePress(QMouseEvent *event)
 
         // Достаем yaw из матрицы и строим вращение вокруг Y
         float yaw_rad = std::atan2(R(1, 0), R(0, 0));
-        m_GoalRoverRotation = Eigen::Quaternionf(Eigen::AngleAxisf(yaw_rad, Eigen::Vector3f::UnitY()));
+
+        m_GoalRoverRotation = Eigen::Quaternionf(Eigen::AngleAxisf(yaw_rad, Eigen::Vector3f::UnitZ()));
 
         // Создаем объект цели
         if (!m_GoalRoverVertexData.isEmpty() && !m_GoalRoverIndexData.isEmpty()) {
@@ -128,7 +129,7 @@ void WidgetCostMap::onMouseMove(QMouseEvent *event)
 
         // Направление от цели к мыши в горизонтальной плоскости
         Eigen::Vector3f direction = currentPlanePos - m_GoalRoverPosition;
-        direction.y() = 0.0f;
+        direction.z() = 0.0f;
 
         if (direction.squaredNorm() > 0.001f) {
         direction.normalize();
@@ -178,10 +179,10 @@ Eigen::Quaternionf WidgetCostMap::calculateLookAtRotation(const Eigen::Vector3f&
     }
     direction.normalize();
 
-    Eigen::Vector3f currentForward = currentRotation * Eigen::Vector3f(0.0f, 0.0f, -1.0f);
-    currentForward.y() = 0.0f;
+    Eigen::Vector3f currentForward = currentRotation * Eigen::Vector3f(0.0f, -1.0f, 0.0f);
+    currentForward.z() = 0.0f;
     if (currentForward.squaredNorm() < 0.001f) {
-        currentForward = Eigen::Vector3f(0.0f, 0.0f, -1.0f);
+        currentForward = Eigen::Vector3f(0.0f, -1.0f, 0.0f);
     }
     currentForward.normalize();
 
@@ -189,7 +190,7 @@ Eigen::Quaternionf WidgetCostMap::calculateLookAtRotation(const Eigen::Vector3f&
     if (axis.squaredNorm() < 0.001f) {
        float dot = currentForward.dot(direction);
        if (dot < -0.999f) {
-       Eigen::Quaternionf flip(Eigen::AngleAxisf(float(M_PI), Eigen::Vector3f::UnitY()));
+       Eigen::Quaternionf flip(Eigen::AngleAxisf(float(M_PI), Eigen::Vector3f::UnitZ()));
        return flip * currentRotation;
        }
        return currentRotation;

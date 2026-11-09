@@ -193,9 +193,7 @@ void OGLWidgetBase::onKeyPress(QKeyEvent *event){}
 
 QVector3D OGLWidgetBase::screenCoordsToPlaneCoords(const QVector2D &mouse_pose)
 {
-    QVector4D mouse_norm(2.0f * mouse_pose.x()/width() - 1.0f,
-                         -2.0f * mouse_pose.y() / height() + 1.0f,
-                         -1.0f, 1.0f);
+    QVector4D mouse_norm(2.0f * mouse_pose.x()/width() - 1.0f, -2.0f * mouse_pose.y() / height() + 1.0f, -1.0f, 1.0f);
 
     QMatrix4x4 offset_matrix = m_ProjectionMatrix.inverted();
     QVector4D mouse_to_cam_coord((offset_matrix * mouse_norm).toVector2D(), -1.0f, 0.0f);
@@ -204,8 +202,8 @@ QVector3D OGLWidgetBase::screenCoordsToPlaneCoords(const QVector2D &mouse_pose)
     QVector3D Ray_Direction((offset_matrix * mouse_to_cam_coord).toVector3D().normalized());
     QVector3D CamPosWorld((offset_matrix * QVector4D(0.0f, 0.0f, 0.0f, 1.0f)).toVector3D());
 
-    QVector3D Normal_to_Plane(0.0, 1.0f, 0.0);
-    QVector3D Center_of_coord_plane(0.0f, -53.0f, 0.0f);
+    QVector3D Normal_to_Plane(0.0f, 1.0f, 0.0f);
+    QVector3D Center_of_coord_plane(0.0f, 0.0f, 0.0f);
 
     float t = (QVector3D::dotProduct(Center_of_coord_plane, Normal_to_Plane) -
                QVector3D::dotProduct(CamPosWorld, Normal_to_Plane)) /

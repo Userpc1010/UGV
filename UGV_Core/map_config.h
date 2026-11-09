@@ -29,7 +29,7 @@
 // Параметры, которые были размазаны по коду
 #define MAP_RESOLUTION    0.1f                     // м/ячейка
 #define TIME_INTERVAL     0.1f                     // сек (10 Гц)
-#define SLOPE_CELL_SIZE   100.0f                   // мм на ячейку в heightmap_to_slope
+#define SLOPE_CELL_SIZE   1.0f                   // мм на ячейку в heightmap_to_slope
 
 #define Map_scale 10.0f
 

@@ -1924,8 +1924,15 @@ void process_costmap_cuda(
 
     const int   DILATION_SIZE          = 3;
 
-    const float MAX_SLOPE              = 2.0f;
-    const float FLAT_SLOPE             = 0.1f;
+    //Угол	Тангенс	Уклон %
+    //20°	0.36	36%
+    //25°	0.47	47%
+    //30°	0.58	58%
+    //35°	0.70	70%
+    //45°	1.0	    100%
+
+    const float MAX_SLOPE              = 0.2f;
+    const float FLAT_SLOPE             = 0.01f;
     const int   INSCRIBED_RADIUS       = 2;
     const int   INFLATION_RADIUS       = 4;
     const float COST_SCALING_FACTOR    = 15.0f;
@@ -2180,8 +2187,9 @@ void process_costmap_cuda(
     // ========================================================================
     // ШАГ 11: slope
     // ========================================================================
+
     heightmap_to_slope_cuda<<<grid, block>>>(
-        dev_dilated, dev_valid_combined, dev_slope, ESTIMATION_SIZE_SLOPE);
+        dev_elevation_map, dev_valid_combined, dev_slope, ESTIMATION_SIZE_SLOPE);
     result = cudaDeviceSynchronize();
     assert(result == cudaSuccess);
 
