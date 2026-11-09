@@ -7,7 +7,7 @@ void MultiDrawLine::draw_lines(QOpenGLShaderProgram *program, QOpenGLFunctions_4
   for(auto o: m_Objects_Line) o->draw(program, functions);
 }
 
-void MultiDrawLine::Add_Lines(GLfloat* vertices_buffer, QVector3D color_buffer, unsigned long long counter, uint16_t index)
+void MultiDrawLine::Add_Lines(GLfloat* vertices_buffer, Eigen::Vector3f color_buffer, unsigned long long counter, uint16_t index)
 {
   m_Objects_Line.append(new DrawLine());
 

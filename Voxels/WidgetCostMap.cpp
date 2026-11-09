@@ -7,6 +7,7 @@
 #include <QFile>
 #include <QTextStream>
 #include <QtMath>
+#include <cmath>
 
 WidgetCostMap::WidgetCostMap(QWidget *parent)
     : OGLWidgetBase(parent)
@@ -51,10 +52,11 @@ void WidgetCostMap::paintSpecific()
     }
 }
 
-QVector3D WidgetCostMap::getPlaneCoordinatesFromMouse(const QVector2D& mousePos)
+Eigen::Vector3f WidgetCostMap::getPlaneCoordinatesFromMouse(const QVector2D& mousePos)
 {
-    // Используем существующий метод, но переименуем для ясности
-    return screenCoordsToPlaneCoords(mousePos);
+   // Используем существующий метод, но переименуем для ясности
+   QVector3D p = screenCoordsToPlaneCoords(mousePos);
+   return Eigen::Vector3f(p.x(), p.y(), p.z());
 }
 
 void WidgetCostMap::onMousePress(QMouseEvent *event)
@@ -65,9 +67,12 @@ void WidgetCostMap::onMousePress(QMouseEvent *event)
         m_GoalRoverPosition = getPlaneCoordinatesFromMouse(QVector2D(event->pos()));
 
         // Берем текущее вращение реального ровера и извлекаем только рыскание
-        QQuaternion realRoverRot = m_Rover->GetRot();
-        QVector3D euler = realRoverRot.toEulerAngles();
-        m_GoalRoverRotation = QQuaternion::fromEulerAngles(0, euler.y(), 0);
+        Eigen::Quaternionf realRoverRot = m_Rover->GetRot();
+        Eigen::Matrix3f R = realRoverRot.toRotationMatrix();
+
+        // Достаем yaw из матрицы и строим вращение вокруг Y
+        float yaw_rad = std::atan2(R(1, 0), R(0, 0));
+        m_GoalRoverRotation = Eigen::Quaternionf(Eigen::AngleAxisf(yaw_rad, Eigen::Vector3f::UnitY()));
 
         // Создаем объект цели
         if (!m_GoalRoverVertexData.isEmpty() && !m_GoalRoverIndexData.isEmpty()) {
@@ -85,7 +90,7 @@ void WidgetCostMap::onMousePress(QMouseEvent *event)
             m_GoalRover->scale(m_RoverScale);
 
             m_GoalRoverPlacing = true; // Включаем режим вращения
-            qDebug() << "Goal rover placing started at:" << m_GoalRoverPosition;
+            qDebug() << "Goal rover placing started at:"<< m_GoalRoverPosition.x() << m_GoalRoverPosition.y() << m_GoalRoverPosition.z();
         }
 
         update();
@@ -119,25 +124,20 @@ void WidgetCostMap::onMouseMove(QMouseEvent *event)
     // Вращение цели при зажатой левой кнопке (если мы в режиме установки)
     if (m_GoalRoverPlacing && (event->buttons() & Qt::LeftButton)) {
         // Получаем текущую позицию мыши на плоскости
-        QVector3D currentPlanePos = getPlaneCoordinatesFromMouse(QVector2D(event->pos()));
+        Eigen::Vector3f currentPlanePos = getPlaneCoordinatesFromMouse(QVector2D(event->pos()));
 
-        // Вычисляем направление от позиции цели к текущей позиции мыши
-        QVector3D direction = currentPlanePos - m_GoalRoverPosition;
-        direction.setY(0); // Проецируем на горизонтальную плоскость
+        // Направление от цели к мыши в горизонтальной плоскости
+        Eigen::Vector3f direction = currentPlanePos - m_GoalRoverPosition;
+        direction.y() = 0.0f;
 
-        if (direction.lengthSquared() > 0.001f) {
-            direction.normalize();
-
-            // Вычисляем новое вращение для цели
-            m_GoalRoverRotation = calculateLookAtRotation(
-                m_GoalRoverPosition,
-                m_GoalRoverPosition + direction,
-                m_GoalRoverRotation);
-
-            // Обновляем вращение объекта цели
-            m_GoalRover->rotate(m_GoalRoverRotation);
-
-            update();
+        if (direction.squaredNorm() > 0.001f) {
+        direction.normalize();
+        m_GoalRoverRotation = calculateLookAtRotation(
+        m_GoalRoverPosition,
+        m_GoalRoverPosition + direction,
+        m_GoalRoverRotation);
+        m_GoalRover->rotate(m_GoalRoverRotation);
+        update();
         }
         event->accept();
         return;
@@ -155,8 +155,10 @@ void WidgetCostMap::onMouseRelease(QMouseEvent *event)
 
         // Испускаем сигнал с позицией и вращением цели
         emit goalPositionSet(m_GoalRoverPosition, m_GoalRoverRotation);
-        qDebug() << "Goal position set:" << m_GoalRoverPosition
-                 << "Rotation:" << m_GoalRoverRotation.toEulerAngles();
+        qDebug() << "Goal position set:"
+        << m_GoalRoverPosition.x() << m_GoalRoverPosition.y() << m_GoalRoverPosition.z()
+        << "Rotation (wxyz):" << m_GoalRoverRotation.w()
+        << m_GoalRoverRotation.x() << m_GoalRoverRotation.y() << m_GoalRoverRotation.z();
 
         event->accept();
         return;
@@ -165,51 +167,38 @@ void WidgetCostMap::onMouseRelease(QMouseEvent *event)
     OGLWidgetBase::onMouseRelease(event);
 }
 
-QQuaternion WidgetCostMap::calculateLookAtRotation(const QVector3D& from,
-                                                 const QVector3D& to,
-                                                 const QQuaternion& currentRotation)
+Eigen::Quaternionf WidgetCostMap::calculateLookAtRotation(const Eigen::Vector3f& from,
+                                                          const Eigen::Vector3f& to,
+                                                          const Eigen::Quaternionf& currentRotation)
 {
     // Вычисляем направление к цели
-    QVector3D direction = to - from;
-
-    if (direction.lengthSquared() < 0.001f) {
-        return currentRotation; // Оставляем текущее вращение
+    Eigen::Vector3f direction = to - from;
+    if (direction.squaredNorm() < 0.001f) {
+        return currentRotation;
     }
-
     direction.normalize();
 
-    // Получаем текущее "вперед" направление цели
-    QVector3D currentForward = currentRotation * QVector3D(0.0f, 0.0f, -1.0f);
-    currentForward.setY(0); // Проецируем на горизонтальную плоскость
-    if (currentForward.lengthSquared() < 0.001f) {
-        currentForward = QVector3D(0.0f, 0.0f, -1.0f);
+    Eigen::Vector3f currentForward = currentRotation * Eigen::Vector3f(0.0f, 0.0f, -1.0f);
+    currentForward.y() = 0.0f;
+    if (currentForward.squaredNorm() < 0.001f) {
+        currentForward = Eigen::Vector3f(0.0f, 0.0f, -1.0f);
     }
     currentForward.normalize();
 
-    // Вычисляем ось вращения
-    QVector3D axis = QVector3D::crossProduct(currentForward, direction);
-
-    // Если векторы коллинеарны
-    if (axis.lengthSquared() < 0.001f) {
-        float dot = QVector3D::dotProduct(currentForward, direction);
-        if (dot < -0.999f) {
-            // Противоположные направления - разворот на 180°
-            QQuaternion flip = QQuaternion::fromAxisAndAngle(QVector3D(0,1,0), 180.0f);
-            return flip * currentRotation;
-        }
-        return currentRotation; // Уже смотрит в нужном направлении
+    Eigen::Vector3f axis = currentForward.cross(direction);
+    if (axis.squaredNorm() < 0.001f) {
+       float dot = currentForward.dot(direction);
+       if (dot < -0.999f) {
+       Eigen::Quaternionf flip(Eigen::AngleAxisf(float(M_PI), Eigen::Vector3f::UnitY()));
+       return flip * currentRotation;
+       }
+       return currentRotation;
     }
-
     axis.normalize();
 
-    // Вычисляем угол
-    float dot = QVector3D::dotProduct(currentForward, direction);
-    float angle = qRadiansToDegrees(qAcos(qMin(qMax(dot, -1.0f), 1.0f)));
-
-    // Создаем кватернион для поворота от currentForward к direction
-    QQuaternion deltaRotation = QQuaternion::fromAxisAndAngle(axis, angle);
-
-    // Применяем дельта-вращение к текущему вращению
+    float dot = std::min(std::max(currentForward.dot(direction), -1.0f), 1.0f);
+    float angle = std::acos(dot);
+    Eigen::Quaternionf deltaRotation(Eigen::AngleAxisf(angle, axis));
     return deltaRotation * currentRotation;
 }
 
@@ -282,27 +271,26 @@ bool WidgetCostMap::loadGoalRoverModel(const QString &path, const QImage &img)
     return true;
 }
 
-void WidgetCostMap::DisplayingCostMap(const QImage &map, QQuaternion rotation)
+void WidgetCostMap::DisplayingCostMap(const QImage &map, Eigen::Quaternionf rotation)
 {
     m_costmap->update_map(map);
     m_Rover->rotate(rotation);
     update();
 }
 
-void WidgetCostMap::DrawLines(GLfloat* vertices_buffer, QVector3D color_buffer,
-                             unsigned long long counter, uint16_t index)
+void WidgetCostMap::DrawLines(GLfloat* vertices_buffer, Eigen::Vector3f color_buffer, unsigned long long counter, uint16_t index)
 {
     m_MultiLineRender->Add_Lines(vertices_buffer, color_buffer, counter, index);
     update();
 }
 
-void WidgetCostMap::DrawCube(QVector3D pos)
+void WidgetCostMap::DrawCube(Eigen::Vector3f pos)
 {
     m_cube->add_cube(pos);
     update();
 }
 
-void WidgetCostMap::DrawAruco(QVector3D pos)
+void WidgetCostMap::DrawAruco(Eigen::Vector3f pos)
 {
     m_Aruco_mobile->translation(pos);
     update();

@@ -68,7 +68,7 @@ void Cube::initCube(float width, const QImage &img)
     m_Objects_Cube.append(obj);
 }
 
-void Cube::add_cube(QVector3D pos)
+void Cube::add_cube(Eigen::Vector3f pos)
 {
   initCube(0.5f, *cube);
 
@@ -77,7 +77,7 @@ void Cube::add_cube(QVector3D pos)
   //qDebug()<< m_Objects_Cube.size();
 }
 
-void Cube::translation(QVector3D pos)
+void Cube::translation(Eigen::Vector3f pos)
 {
     if (m_Objects_Cube.isEmpty()) return; // Защита от пустых вызовов
       m_Objects_Cube.back()->translate(pos);
@@ -88,7 +88,7 @@ void Cube::Invisible_AllCube(bool invisible_)
    invisible = invisible_;
 }
 
-void Cube::Offset_AllCube(QVector3D pos)
+void Cube::Offset_AllCube(Eigen::Vector3f pos)
 {
   for(uint16_t i = 0; i < m_Objects_Cube.size(); i++) m_Objects_Cube[i]->offset(pos);
 }

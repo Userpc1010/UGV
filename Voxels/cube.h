@@ -14,10 +14,10 @@ public:
     void draw_cube(QOpenGLShaderProgram* program, QOpenGLFunctions_4_5_Core *functions);
     void initCube(float width, const QImage &img);
 
-    void add_cube (QVector3D pos);
-    void translation(QVector3D pos);
+    void add_cube (Eigen::Vector3f pos);
+    void translation(Eigen::Vector3f pos);
     void Invisible_AllCube (bool invisible_);
-    void Offset_AllCube (QVector3D pos);
+    void Offset_AllCube (Eigen::Vector3f pos);
     void setApplyMapOffset(bool v);
     void delete_cube ();
 

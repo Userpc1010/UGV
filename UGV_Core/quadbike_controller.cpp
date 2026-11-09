@@ -121,17 +121,15 @@ quadbike_controller::~quadbike_controller()
 float quadbike_controller::computeYaw(const odometry& odom)
 {
     // Кватернион в yaw (поворот вокруг Z)
-    Eigen::Quaternionf q(odom.w, odom.x, odom.y, odom.z);
-    Eigen::Vector3f forward = q * Eigen::Vector3f::UnitZ();  // или UnitX
+    Eigen::Vector3f forward = odom.orientation * Eigen::Vector3f::UnitZ();  // или UnitX
     return std::atan2(forward.x(), forward.z());
 }
 
 float quadbike_controller::computeLinearVel(const odometry& odom, float yaw)
 {
     // Проекция скорости на направление движения
-    Eigen::Vector3f vel(odom.x_vel, odom.y_vel, odom.z_vel);
     Eigen::Vector3f forward(std::cos(yaw), 0.0f, std::sin(yaw));
-    return vel.dot(forward);
+    return odom.velocity.dot(forward);
 }
 
 // ========== ОБНОВЛЕНИЕ VPC ==========
@@ -147,7 +145,7 @@ void quadbike_controller::updateVPC()
 
     // Вызов VPC
     vpc::VPCOutput vpc_out = m_vpcController->computeVelocityCommands(
-        data_.x_pos, data_.z_pos, yaw,
+        data_.position.x(), data_.position.y(), yaw,
         v_current, w_current,
         0.05f  // dt
     );

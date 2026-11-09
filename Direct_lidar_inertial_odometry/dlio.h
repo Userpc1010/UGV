@@ -73,7 +73,7 @@ std::string to_string_with_precision(const T a_value, const int n = 6)
 
 //
 #include <LivoxData.hpp>
-#include <timer.hpp>>
+#include <timer.hpp>
 #include <GLFW/glfw3.h>
 
 namespace dlio {

@@ -4,6 +4,8 @@
 #include<QOpenGLBuffer>
 #include<QMatrix4x4>
 #include<QVector2D>
+#include <Eigen/Dense>
+#include <Eigen/Geometry>
 
 class QOpenGLTexture;
 class QOpenGLShaderProgram;
@@ -28,13 +30,13 @@ public:
     void init(const QVector<VertexData> &vert, const QVector<GLuint> &ind, const QImage &img);
     void init_fast();
     void draw(QOpenGLShaderProgram* program, QOpenGLFunctions_4_5_Core * functions);
-    void rotate(const QQuaternion &r);
-    void translate(const QVector3D &t);
-    void offset (const QVector3D &t);
+    void rotate(const Eigen::Quaternionf &r);
+    void translate(const Eigen::Vector3f &t);
+    void offset (const Eigen::Vector3f &t);
     void scale(const float &s);
     void setGlobalTransform(const QMatrix4x4 &gt);
-    QQuaternion GetRot () {return m_Rotate;}
-    QVector3D GetPosition () {return m_Translate;}
+    Eigen::Quaternionf GetRot () {return m_Rotate;}
+    Eigen::Vector3f GetPosition () {return m_Translate;}
     void setApplyMapOffset(bool v) { m_ApplyMapOffset = v; }
     bool isApplyMapOffset() const { return m_ApplyMapOffset; }
 
@@ -48,8 +50,8 @@ private:
     QOpenGLBuffer m_IndexBuffer;
     QOpenGLTexture* m_Texture;
 
-    QQuaternion m_Rotate;
-    QVector3D m_Translate;
+    Eigen::Quaternionf m_Rotate;
+    Eigen::Vector3f m_Translate;
     float m_Scale;
     bool m_ApplyMapOffset;
     QMatrix4x4 m_GlobalTransform;

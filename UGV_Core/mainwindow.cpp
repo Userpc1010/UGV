@@ -63,8 +63,8 @@ MainWindow::MainWindow(QWidget *parent) :
   qRegisterMetaType< QVector<QVector3D> >("QVector<QVector3D");
   qRegisterMetaType<Path>("Path");
   qRegisterMetaType<std::vector<std::tuple<float, float, float>>>("std::vector<std::tuple<float,float,float>>");
- // qRegisterMetaType< ImuConst >("ImuConst");
- // qRegisterMetaType< CustomMsg >("CustomMsg");
+  qRegisterMetaType<Eigen::Vector3f>("Eigen::Vector3f");
+  qRegisterMetaType<Eigen::Quaternionf>("Eigen::Quaternionf");
 
     thread_controller = new QThread(this);
     controller = new quadbike_controller(nullptr);
@@ -94,7 +94,7 @@ MainWindow::MainWindow(QWidget *parent) :
     thread_Processor->start(QThread::NormalPriority);
 
 
-    connect(&SDK->Node, SIGNAL(DisplayingPoint(GLfloat*, GLfloat*,unsigned long long,QQuaternion, QVector3D)),                                   widgetLidar, SLOT(DisplayingPoint(GLfloat*,GLfloat*,unsigned long long,QQuaternion, QVector3D)));
+    connect(&SDK->Node, SIGNAL(DisplayingPoint(GLfloat*, GLfloat*,unsigned long long,Eigen::Quaternionf, Eigen::Vector3f)),                      widgetLidar, SLOT(DisplayingPoint(GLfloat*,GLfloat*,unsigned long long,Eigen::Quaternionf, Eigen::Vector3f)));
 
     connect(&SDK->Node, SIGNAL(DisplayingPointMap(GLfloat*, GLfloat*,unsigned long long)),                                                       widgetLidar, SLOT(DisplayingMapPoint(GLfloat*,GLfloat*,unsigned long long)));
 
@@ -106,7 +106,7 @@ MainWindow::MainWindow(QWidget *parent) :
 
     connect(this, SIGNAL(destroyed(QObject*)),                                                                                                   thread_Processor, SLOT(quit()));
 
-    connect(&SDK->Node, SIGNAL(point_cloud_lidar(const int16_t*, uint32_t, const int16_t*, uint32_t)),                                          processor, SLOT(point_cloud_lidar(const int16_t*, uint32_t, const int16_t*, uint32_t)));
+    connect(&SDK->Node, SIGNAL(point_cloud_lidar(const float*, uint32_t, const float*, uint32_t, const float*)),                                 processor, SLOT(point_cloud_lidar(const float*, uint32_t, const float*, uint32_t, const float*)));
 
     connect(&SDK->Node, SIGNAL(odometry_lidar(odometry)),                                                                                        processor,SLOT(odometry_lidar(odometry)));
 
@@ -116,23 +116,23 @@ MainWindow::MainWindow(QWidget *parent) :
 
     connect(processor->state_lattice_, SIGNAL(planningFinished(bool, const Path&, const std::vector<std::tuple<float, float, float>>&, double)), controller, SLOT(onPlanningFinished(bool, const Path&, const std::vector<std::tuple<float, float, float>>&, double)));
 
-    connect(processor, SIGNAL(DisplayingHeightMap(const float*, float, float, float, QQuaternion)),                                              widgetCamera, SLOT (DisplayingHeightMap(const float*, float, float, float, QQuaternion)));
+    connect(processor, SIGNAL(DisplayingHeightMap(const float*, float, float, float, Eigen::Quaternionf)),                                       widgetCamera, SLOT (DisplayingHeightMap(const float*, float, float, float, Eigen::Quaternionf)));
 
-    connect(processor, SIGNAL(DisplayingCostMap(QImage, QQuaternion)),                                                                           widgetCostMap, SLOT(DisplayingCostMap(QImage, QQuaternion)));
+    connect(processor, SIGNAL(DisplayingCostMap(QImage, Eigen::Quaternionf)),                                                                    widgetCostMap, SLOT(DisplayingCostMap(QImage, Eigen::Quaternionf)));
 
-    connect(processor->state_lattice_, SIGNAL(DrawLines(GLfloat*,QVector3D,unsigned long long,uint16_t)),                                        widgetCostMap, SLOT(DrawLines(GLfloat*,QVector3D,unsigned long long,uint16_t)));
+    connect(processor->state_lattice_, SIGNAL(DrawLines(GLfloat*,Eigen::Vector3f,unsigned long long,uint16_t)),                                  widgetCostMap, SLOT(DrawLines(GLfloat*,Eigen::Vector3f,unsigned long long,uint16_t)));
 
-    connect(widgetCostMap, SIGNAL(goalPositionSet(QVector3D,QQuaternion)),                                                                       processor, SLOT(goalPositionSet(QVector3D,QQuaternion)));
+    connect(widgetCostMap, SIGNAL(goalPositionSet(Eigen::Vector3f,Eigen::Quaternionf)),                                                          processor, SLOT(goalPositionSet(Eigen::Vector3f,Eigen::Quaternionf)));
 
-    connect(processor,SIGNAL(DrawCube(QVector3D)),                                                                                               widgetCamera,SLOT(DrawCube(QVector3D)));
+    connect(processor,SIGNAL(DrawCube(Eigen::Vector3f)),                                                                                         widgetCamera,SLOT(DrawCube(Eigen::Vector3f)));
 
-    connect(processor,SIGNAL(updateMapOffset(QVector3D)),                                                                                        widgetCamera,SLOT(updateMapOffset(QVector3D)));
+    connect(processor,SIGNAL(updateMapOffset(Eigen::Vector3f)),                                                                                  widgetCamera,SLOT(updateMapOffset(Eigen::Vector3f)));
 
-    connect(processor, SIGNAL(DrawAruco(QVector3D)),                                                                                             widgetCamera, SLOT(DrawAruco(QVector3D)));
+    connect(processor, SIGNAL(DrawAruco(Eigen::Vector3f)),                                                                                       widgetCamera, SLOT(DrawAruco(Eigen::Vector3f)));
 
     connect(processor, SIGNAL(Invisible_Aruco(bool)),                                                                                            widgetCamera, SLOT(Invisible_Aruco(bool)));
 
-    connect(processor, SIGNAL(DrawAruco(QVector3D)),                                                                                             widgetCostMap, SLOT(DrawAruco(QVector3D)));
+    connect(processor, SIGNAL(DrawAruco(Eigen::Vector3f)),                                                                                       widgetCostMap, SLOT(DrawAruco(Eigen::Vector3f)));
 
     connect(processor, SIGNAL(Invisible_Aruco(bool)),                                                                                            widgetCostMap, SLOT(Invisible_Aruco(bool)));
 

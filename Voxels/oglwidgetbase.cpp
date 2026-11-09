@@ -8,11 +8,11 @@
 
 OGLWidgetBase::OGLWidgetBase(QWidget *parent)
     : QOpenGLWidget(parent)
-     , m_mapOffset(0, 0, 0)  // Инициализируем нулевым смещением
+    , m_mapOffset(Eigen::Vector3f::Zero())  // Инициализируем нулевым смещением
 {
     init_pos = QVector3D(0.0f, 0.0f, 0.0f);
     function = new QOpenGLFunctions_4_5_Core();
-    m_camera = new Camera_3D(init_pos * -5.0f);
+    m_camera = new Camera_3D(init_pos);
     m_Rover = new SimpleObject3D();
 }
 
@@ -40,9 +40,10 @@ void OGLWidgetBase::initializeGL()
     if(initObj(":/Moon_Rover/14014_Moon_Rover_V1_l1.obj",
                QImage(":/Moon_Rover/14014_Moon_Rover_V1_Atlas.png")))
     {
-        m_Rover->translate(init_pos);
+        m_Rover->translate(Eigen::Vector3f(init_pos.x(), init_pos.y(), init_pos.z()));
         m_Rover->scale(m_RoverScale);
         m_Rover->setApplyMapOffset(false);
+
     }
 
     // Вызов специфичной инициализации наследника
@@ -63,7 +64,9 @@ void OGLWidgetBase::paintGL()
 
     m_Program.bind();
     m_Program.setUniformValue("u_projectionMatrix", m_ProjectionMatrix);
-    m_Program.setUniformValue("u_map_offset", m_mapOffset);  // Устанавливаем смещение
+    m_Program.setUniformValue("u_map_offset", QVector3D(m_mapOffset.x(), m_mapOffset.y(), m_mapOffset.z())); // Устанавливаем смещение
+
+    m_camera->draw(&m_Program);
 
     // Рисуем ровер (общий для всех)
     m_Rover->draw(&m_Program, function);
@@ -71,17 +74,16 @@ void OGLWidgetBase::paintGL()
     // Рисуем специфичные объекты
     paintSpecific();
 
-    m_camera->draw(&m_Program);
     m_Program.release();
 }
 
-void OGLWidgetBase::setMapOffset(QVector3D offset)
+void OGLWidgetBase::setMapOffset(Eigen::Vector3f offset)
 {
     m_mapOffset = offset;
 
     if (m_Program.isLinked()) {
         m_Program.bind();
-        m_Program.setUniformValue("u_map_offset", m_mapOffset);
+        m_Program.setUniformValue("u_map_offset", QVector3D(m_mapOffset.x(), m_mapOffset.y(), m_mapOffset.z()));
         m_Program.release();
         update();
     }

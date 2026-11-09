@@ -1,6 +1,7 @@
 #include "WidgetLidar.h"
 #include "pointrender.h"
 #include "simpleobject3d.h"
+#include "camera_3d.h"
 
 WidgetLidar::WidgetLidar(QWidget *parent)
     : OGLWidgetBase(parent)
@@ -9,6 +10,7 @@ WidgetLidar::WidgetLidar(QWidget *parent)
 {
     // Увеличиваем масштаб ровера для режима лидара
     m_RoverScale = 10.0f;
+    m_camera->SetPositionCamera(QVector3D(-100.0f, 100.0f, 0.0f));
 }
 
 WidgetLidar::~WidgetLidar()
@@ -30,8 +32,8 @@ void WidgetLidar::paintSpecific()
 }
 
 void WidgetLidar::DisplayingPoint(GLfloat* vertices_buffer, GLfloat* color_buffer,
-                                 unsigned long long counter, QQuaternion rotation,
-                                 QVector3D translation)
+                                 unsigned long long counter, Eigen::Quaternionf rotation,
+                                 Eigen::Vector3f translation)
 {
     m_PointRender->translate(vertices_buffer, color_buffer, counter);
     m_Rover->rotate(rotation);

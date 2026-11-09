@@ -3,6 +3,8 @@
 
 #include <QOpenGLBuffer>
 #include <QMatrix4x4>
+#include <Eigen/Dense>
+#include <Eigen/Geometry>
 
 class QOpenGLShaderProgram;
 class QOpenGLFunctions_4_5_Core;

@@ -38,15 +38,15 @@ void WidgetCamera::paintSpecific()
 }
 
 
-void WidgetCamera::DisplayingHeightMap(const float* data,  float min, float max, float targetHeight, QQuaternion rotation)
+void WidgetCamera::DisplayingHeightMap(const float* data,  float min, float max, float targetHeight, Eigen::Quaternionf rotation)
 {
     m_HeightMap->update_map(data, min, max);
     m_Rover->rotate(rotation);
-    m_Rover->translate(QVector3D(0.0f, targetHeight, 0.0f));
+    m_Rover->translate(Eigen::Vector3f(0.0f, targetHeight, 0.0f));
     update();
 }
 
-void WidgetCamera::DrawAruco(QVector3D pos)
+void WidgetCamera::DrawAruco(Eigen::Vector3f pos)
 {
     m_Aruco_mobile->translation(pos);
     update();
@@ -64,15 +64,20 @@ void WidgetCamera::Drone_scale(float s)
     update();
 }
 
-void WidgetCamera::DrawLines(GLfloat *vertices_buffer, QVector3D color_buffer, uint32_t counter, uint16_t index)
+void WidgetCamera::DrawLines(GLfloat *vertices_buffer, Eigen::Vector3f color_buffer, unsigned long long counter, uint16_t index)
 {
     m_MultiLineRender->Add_Lines(vertices_buffer, color_buffer, counter, index);
     update();
 }
 
-void WidgetCamera::DrawCube(QVector3D pos)
+void WidgetCamera::DrawCube(Eigen::Vector3f pos)
 {
-    m_cube->add_cube(pos);
+
+}
+
+void WidgetCamera::updateMapOffset(Eigen::Vector3f offset)
+{
+    this->setMapOffset(offset);
     update();
 }
 
@@ -80,11 +85,6 @@ void WidgetCamera::ClearLine()
 {
     m_MultiLineRender->Clear_Lines();
     m_cube->delete_cube();
-}
-
-void WidgetCamera::updateMapOffset(QVector3D offset)
-{
-  this->setMapOffset(offset);
 }
 
 //void WidgetCamera::onMousePress(QMouseEvent *event)

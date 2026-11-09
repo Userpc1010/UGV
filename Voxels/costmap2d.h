@@ -3,6 +3,8 @@
 
 #include <QOpenGLBuffer>
 #include <QMatrix4x4>
+#include <Eigen/Dense>
+#include <Eigen/Geometry>
 
 class QOpenGLTexture;
 class QOpenGLShaderProgram;

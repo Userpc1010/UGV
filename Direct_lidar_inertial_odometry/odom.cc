@@ -382,25 +382,16 @@ void dlio::OdomNode::publishPose() {
 
     this->odom.timestamp = this->imu_meas.stamp;
 
-     this->odom.x_pos = this->state.p[0];
-     this->odom.y_pos = this->state.p[1];
-     this->odom.z_pos = this->state.p[2];
+    this->odom.position    = this->state.p;
+    this->odom.orientation = this->state.q;
+    this->odom.velocity    = this->state.v.lin.w; // Скорость в мировой системе
 
-     this->odom.w = this->state.q.w();
-     this->odom.x = this->state.q.x();
-     this->odom.y = this->state.q.y();
-     this->odom.z = this->state.q.z();
-
-     this->odom.x_vel = this->state.v.lin.w[0];
-     this->odom.y_vel = this->state.v.lin.w[1];
-     this->odom.z_vel = this->state.v.lin.w[2];
-
-     emit odometry_lidar(odom);
+    emit odometry_lidar(this->odom);
 }
 
-void dlio::OdomNode::publishToROS(pcl::PointCloud<PointType>::ConstPtr published_cloud, Eigen::Matrix4f T_cloud) {
+void dlio::OdomNode::publishToROS(pcl::PointCloud<PointType>::ConstPtr published_cloud, Eigen::Matrix4f T_cloud, Eigen::Matrix4f T_global) {
 
-        this->publishCloud(published_cloud, T_cloud);
+        this->publishCloud(published_cloud, T_cloud, T_global);
 
         if(state_windosw == 1) {
 
@@ -417,9 +408,9 @@ void dlio::OdomNode::publishToROS(pcl::PointCloud<PointType>::ConstPtr published
 
            for (uint32_t i = 0; i < size; i++)
            {
-               vertices_data_Map[i * 3] = 200.0f + this->submap_cloud->points[i].y * 100.0f;
-               vertices_data_Map[i * 3 + 1] = -50.0f + this->submap_cloud->points[i].z  * 100.0f;
-               vertices_data_Map[i * 3 + 2] = -200.0f + this->submap_cloud->points[i].x  * 100.0f;
+               vertices_data_Map[i * 3] = this->submap_cloud->points[i].x * 100.0f;
+               vertices_data_Map[i * 3 + 1] = this->submap_cloud->points[i].z  * 100.0f;
+               vertices_data_Map[i * 3 + 2] = this->submap_cloud->points[i].y  * 100.0f;
 
                //qDebug()<<" intencity: "<<laserCloudWorld.intensity;
 
@@ -435,7 +426,7 @@ void dlio::OdomNode::publishToROS(pcl::PointCloud<PointType>::ConstPtr published
       }
 }
 
-void dlio::OdomNode::publishCloud(pcl::PointCloud<PointType>::ConstPtr published_cloud, Eigen::Matrix4f T_cloud) {
+void dlio::OdomNode::publishCloud(pcl::PointCloud<PointType>::ConstPtr published_cloud, Eigen::Matrix4f T_cloud, Eigen::Matrix4f T_global) {
 
     if (this->wait_until_move_) {
        if (this->length_traversed < 0.1) { return; }
@@ -465,9 +456,9 @@ void dlio::OdomNode::publishCloud(pcl::PointCloud<PointType>::ConstPtr published
 
          for (uint32_t i = 0; i < size; i++)
          {
-             vertices_data_lidar[i * 3] = 200.0f + current_scan->points[i].y * 100.0f;
-             vertices_data_lidar[i * 3 + 1] = -50.0f + current_scan->points[i].z * 100.0f;
-             vertices_data_lidar[i * 3 + 2] = -200.0f + current_scan->points[i].x * 100.0f;
+             vertices_data_lidar[i * 3] = current_scan->points[i].x * 100.0f;
+             vertices_data_lidar[i * 3 + 1] = current_scan->points[i].z * 100.0f;
+             vertices_data_lidar[i * 3 + 2] = current_scan->points[i].y * 100.0f;
 
              c = GetColor(current_scan->points[i].intensity, min, max);
 
@@ -476,25 +467,27 @@ void dlio::OdomNode::publishCloud(pcl::PointCloud<PointType>::ConstPtr published
              color_data_lidar[i * 3 + 2] = c.b;
          }
 
-          emit DisplayingPoint(vertices_data_lidar, color_data_lidar, size, QQuaternion(odom.z, odom.x, -odom.w, -odom.y), QVector3D(200.0f + odom.y_pos * 100.0f, -50.0f + odom.z_pos * 100.0f, -200.0f +odom.x_pos * 100.0f));
+          emit DisplayingPoint(vertices_data_lidar, color_data_lidar, size, odom.orientation, odom.position * 100.0f);
 
      }
 
      if(ptr_guard_current_scan_pcl_data_lidar){ptr_guard_current_scan_pcl_data_lidar = false; delete [] current_scan_pcl_data_lidar;}
 
-     current_scan_pcl_data_lidar = new int16_t [3 * size]; ptr_guard_current_scan_pcl_data_lidar = true;
+     current_scan_pcl_data_lidar = new float [3 * size]; ptr_guard_current_scan_pcl_data_lidar = true;
 
      for (uint32_t i = 0; i < size; i++)
      {
-//       current_scan_pcl_data_lidar[i * 3] = current_scan->points[i].x - this->odom.x_pos;
-//       current_scan_pcl_data_lidar[i * 3 + 1] = current_scan->points[i].y - this->odom.y_pos;
-//       current_scan_pcl_data_lidar[i * 3 + 2] = current_scan->points[i].z - this->odom.z_pos;
-
-         current_scan_pcl_data_lidar[i * 3]     = (int16_t)((current_scan->points[i].x - this->odom.x_pos) * 1000.0f);
-         current_scan_pcl_data_lidar[i * 3 + 1] = (int16_t)((current_scan->points[i].y - this->odom.y_pos) * 1000.0f);
-         current_scan_pcl_data_lidar[i * 3 + 2] = (int16_t)((current_scan->points[i].z - this->odom.z_pos) * 1000.0f);
+         current_scan_pcl_data_lidar[i * 3]     = current_scan->points[i].x - odom.position.x();
+         current_scan_pcl_data_lidar[i * 3 + 1] = current_scan->points[i].y - odom.position.y();
+         current_scan_pcl_data_lidar[i * 3 + 2] = current_scan->points[i].z - odom.position.z();
      }
-     emit point_cloud_lidar(keyframe_pcl_data_lidar, keyframe_size, current_scan_pcl_data_lidar, size);
+
+     float T_arr[16];
+     for (int i = 0; i < 4; i++)
+         for (int j = 0; j < 4; j++)
+             T_arr[i*4 + j] = T_global(i, j);
+
+     emit point_cloud_lidar(keyframe_pcl_data_lidar, keyframe_size, current_scan_pcl_data_lidar, size, T_arr);
 
      keyframe_size = 0;
 
@@ -515,20 +508,18 @@ void dlio::OdomNode::publishKeyframe(std::pair<std::pair<Eigen::Vector3f, Eigen:
 
          uint32_t size  = kf.second->points.size();
 
-        if(ptr_guard_keyframe_pcl_data_lidar){ptr_guard_keyframe_pcl_data_lidar = false; delete [] keyframe_pcl_data_lidar;}
+         if(ptr_guard_keyframe_pcl_data_lidar){ptr_guard_keyframe_pcl_data_lidar = false; delete [] keyframe_pcl_data_lidar;}
 
+         keyframe_pcl_data_lidar = new float [3 * size]; ptr_guard_keyframe_pcl_data_lidar = true;
 
-        keyframe_pcl_data_lidar = new int16_t [3 * size]; ptr_guard_keyframe_pcl_data_lidar = true;
+         for (uint32_t i = 0; i < size; i++)
+         {
+             keyframe_pcl_data_lidar[i * 3]     = kf.second->points[i].x - kf.first.first[0];
+             keyframe_pcl_data_lidar[i * 3 + 1] = kf.second->points[i].y - kf.first.first[1];
+             keyframe_pcl_data_lidar[i * 3 + 2] = kf.second->points[i].z - kf.first.first[2];
+         }
+         keyframe_size = size;
 
-        for (uint32_t i = 0; i < size; i++)
-        {
-
-           keyframe_pcl_data_lidar[i * 3]     = (int16_t)((kf.second->points[i].x - kf.first.first[0]) * 1000.0f); // X (мм)
-           keyframe_pcl_data_lidar[i * 3 + 1] = (int16_t)((kf.second->points[i].y - kf.first.first[1]) * 1000.0f); // Y (мм)
-           keyframe_pcl_data_lidar[i * 3 + 2] = (int16_t)((kf.second->points[i].z - kf.first.first[2]) * 1000.0f); // Z (высота, мм)
-
-        }
-        keyframe_size = size;
         }
        } else {
 
@@ -536,14 +527,13 @@ void dlio::OdomNode::publishKeyframe(std::pair<std::pair<Eigen::Vector3f, Eigen:
 
             if(ptr_guard_keyframe_pcl_data_lidar){ptr_guard_keyframe_pcl_data_lidar = false; delete [] keyframe_pcl_data_lidar;}
 
-
-            keyframe_pcl_data_lidar = new int16_t [3 * size]; ptr_guard_keyframe_pcl_data_lidar = true;
+            keyframe_pcl_data_lidar = new float [3 * size]; ptr_guard_keyframe_pcl_data_lidar = true;
 
             for (uint32_t i = 0; i < size; i++)
             {
-                keyframe_pcl_data_lidar[i * 3]     = (int16_t)((kf.second->points[i].x - kf.first.first[0]) * 1000.0f); // X (мм)
-                keyframe_pcl_data_lidar[i * 3 + 1] = (int16_t)((kf.second->points[i].y - kf.first.first[1]) * 1000.0f); // Y (мм)
-                keyframe_pcl_data_lidar[i * 3 + 2] = (int16_t)((kf.second->points[i].z - kf.first.first[2]) * 1000.0f); // Z (высота, мм)
+                keyframe_pcl_data_lidar[i * 3]     = kf.second->points[i].x - kf.first.first[0];
+                keyframe_pcl_data_lidar[i * 3 + 1] = kf.second->points[i].y - kf.first.first[1];
+                keyframe_pcl_data_lidar[i * 3 + 2] = kf.second->points[i].z - kf.first.first[2];
             }
 
             keyframe_size = size;
@@ -905,7 +895,7 @@ void dlio::OdomNode::callbackPointCloud(const CustomMsg pc) {
   }
 
   //publishToROS(published_cloud, this->T_corr);
-  this->publish_thread = std::thread( &dlio::OdomNode::publishToROS, this, published_cloud, this->T_corr );
+  this->publish_thread = std::thread(&dlio::OdomNode::publishToROS, this, published_cloud, this->T_corr, this->T);
   this->publish_thread.detach();
 
   // Update some statistics

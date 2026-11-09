@@ -3,6 +3,8 @@
 
 #include <QOpenGLBuffer>
 #include <QMatrix4x4>
+#include <Eigen/Core>
+#include <Eigen/Geometry>
 
 class QOpenGLShaderProgram;
 class QOpenGLFunctions_4_5_Core;
@@ -16,7 +18,7 @@ public:
 
     void draw(QOpenGLShaderProgram* program, QOpenGLFunctions_4_5_Core * functions);
 
-    void DrawLines(GLfloat* vertices_buffer, QVector3D color_buffer, uint64_t counter);
+    void DrawLines(GLfloat* vertices_buffer, Eigen::Vector3f color_buffer, uint64_t counter);
 
 protected:
 
@@ -28,7 +30,7 @@ private:
 
     uint32_t object_counter = 0;
 
-    QVector3D color;
+    Eigen::Vector3f color = Eigen::Vector3f::Ones();
 
 };
 

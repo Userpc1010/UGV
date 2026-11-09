@@ -58,7 +58,7 @@ void DrawLine::draw(QOpenGLShaderProgram *program, QOpenGLFunctions_4_5_Core *fu
     program->setUniformValue("r_id", 2);
     program->setUniformValue("p_id", 2);
     program->setUniformValue("u_apply_map_offset", 1);
-    program->setUniformValue("u_color", color);
+    program->setUniformValue("u_color", QVector3D(color.x(), color.y(), color.z()));
 
     m_VertexBuffer.bind();
 
@@ -71,7 +71,7 @@ void DrawLine::draw(QOpenGLShaderProgram *program, QOpenGLFunctions_4_5_Core *fu
     m_VertexBuffer.release();
 }
 
-void DrawLine::DrawLines(GLfloat* vertices_buffer, QVector3D color_buffer, uint64_t counter)
+void DrawLine::DrawLines(GLfloat* vertices_buffer, Eigen::Vector3f color_buffer, uint64_t counter)
 {
    free();
 

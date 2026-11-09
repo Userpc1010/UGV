@@ -21,16 +21,17 @@ extern "C" void init_elevation_defaults(float* dev_elevation_map, float initial_
 
 
 
-extern "C" void process_costmap_cuda(
-    const int16_t* lidar_pcl, int num_points,
-    const float* sensor_pos,
-    float* dev_elevation_map, float* dev_new_map, float* dev_normal_map,
-    float* dev_error, float* dev_error_cnt,
-    uint8_t* dev_costmap, uint8_t* costmap_host, uint32_t* costmap_rgba_host,
-    float* heightmap_packed_host,
-    float position_noise, float orientation_noise,
-    float* out_h_min, float* out_h_max, float* out_rover_height_m
-);
+extern "C" void process_costmap_cuda(const float* lidar_pcl, int num_lidar,
+                                     const float* sensor_pos_lidar,
+                                     const float* cam_pcl, int num_cam,
+                                     const float* sensor_pos_cam,
+                                     float* dev_elevation_map, float* dev_new_map, float* dev_normal_map,
+                                     float* dev_error, float* dev_error_cnt,
+                                     uint8_t* dev_costmap, uint8_t* costmap_host,
+                                     uint32_t* costmap_rgba_host,
+                                     float* heightmap_packed_host,
+                                     float position_noise, float orientation_noise,
+                                     float* out_h_min, float* out_h_max, float* out_rover_height_m);
 
 extern "C"
 void shift_map_xy_cuda(float* dev_elevation_map, float* dev_normal_map,
@@ -40,6 +41,19 @@ extern "C"
 void shift_map_z_cuda(float* dev_elevation_map, float delta_z);
 
 extern "C" void update_time_cuda(float* dev_elevation_map, float dt);
+
+extern "C"
+int init_frustum_cuda(const rs2_intrinsics &intrin);
+
+extern "C" void deproject_depth_cuda( float* out_points_cpu,
+                                      uint32_t* out_num_points,
+                                      uint32_t total_voxels_frustum,
+                                      const rs2_intrinsics& intrin,
+                                      const uint16_t* depth, float depth_scale,
+                                      const float R_cam_to_base[9],
+                                      const float t_cam_to_base[3],
+                                      const float R_base_to_map[9],
+                                      const float shift[3]);
 
 uint32_t floatBitsToUint_memcpy(float f) {
     uint32_t u;
@@ -84,6 +98,7 @@ Processor::Processor(QObject *parent)
     costmap = nullptr;
     heightmap_packed = nullptr;
     dev_shift_temp = nullptr;
+    points_cam_cpu = nullptr;
 
    // Create the dictionary from the same dictionary the marker was generated.
 //   cv::aruco::Dictionary dir = cv::aruco::getPredefinedDictionary(cv::aruco::PredefinedDictionaryType(cv::aruco::DICT_4X4_50));
@@ -105,14 +120,18 @@ Processor::~Processor()
  dev_error = nullptr;
  dev_error_cnt = nullptr;
  dev_costmap = nullptr;
+ if (points_cam_cpu) { delete[] points_cam_cpu; points_cam_cpu = nullptr; }
  if (costmap_rgba) { delete[] costmap_rgba; costmap_rgba = nullptr; }
  if (costmap) { delete[] costmap; costmap = nullptr; }
  if (heightmap_packed) { delete[] heightmap_packed; heightmap_packed = nullptr; }
 }
 
-void Processor::goalPositionSet(QVector3D position, QQuaternion rotation)
+void Processor::goalPositionSet(Eigen::Vector3f position, Eigen::Quaternionf rotation)
 {
-   Finding_start_end_of_the_map_2d(position.x(), -position.z(), rotation.toEulerAngles().y());
+  Eigen::Matrix3f R = rotation.toRotationMatrix();
+  float yaw_deg = std::atan2(R(1, 0), R(0, 0)) * 180.0f / float(M_PI);
+
+  Finding_start_end_of_the_map_2d(position.x(), -position.z(), yaw_deg);
 }
 
 void Processor::WindowState(uint8_t state)
@@ -148,123 +167,178 @@ void Processor::timesync(uint64_t timebase, uint64_t time)
     }
 }
 
-void Processor::point_cloud_lidar(const int16_t * keyframe_pcl, uint32_t size_keyframe,
-                                  const int16_t * lidar_pcl, uint32_t size_pcl)
+void Processor::point_cloud_lidar(const float * keyframe_pcl, uint32_t size_keyframe,
+                                  const float * lidar_pcl, uint32_t size_pcl,
+                                  const float* T_arr_16)
 {
-        // === Забираем синхронизированный кадр камеры ===
-        rs2::frame depth;
-        float depth_scale;
+    // ========================================================================
+    // ШАГ 1: Забрать синхронизированный кадр камеры (retry ~10 мс)
+    // ========================================================================
+    bool has_camera = false;
+    rs2::frame depth;
+    float depth_scale = 0.0f;
 
-        {
-            std::unique_lock<std::mutex> lk(depth_mutex);
-
-//            if (!depth_ready) {
-//                std::cout << "[SYNC] Дроп: лидар без кадра камеры" << std::endl;
-//                return;
-//            }
+    if (!depth_ready) {
+        for (int retry = 0; retry < 10; retry++) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            std::lock_guard<std::mutex> lk(depth_mutex);
+            if (depth_ready) break;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lk(depth_mutex);
+        if (depth_ready) {
             depth = pending_depth_frame_2;
             depth_scale = pending_depth_scale_2;
             depth_ready = false;
-
-            lk.unlock();
+            has_camera = true;
         }
+    }
 
-        const uint16_t *depth_data = (const uint16_t*)depth.get_data();
+    const uint16_t* depth_data = has_camera ? (const uint16_t*)depth.get_data() : nullptr;
 
-        // === Расчёт сдвига карты (как в elevation_mapping_cupy) ===
-        const float RESOLUTION = 0.1f;
+    // ========================================================================
+    // ШАГ 2: Сдвиг карты под новую позицию робота
+    // ========================================================================
 
-        float position_x = static_cast<float>(odom.x_pos);
-        float position_y = static_cast<float>(odom.y_pos);
-        float position_z = static_cast<float>(odom.z_pos);
+    float position_x = static_cast<float>(odom.position.x());
+    float position_y = static_cast<float>(odom.position.y());
+    float position_z = static_cast<float>(odom.position.z());
 
-        float delta_x = position_x - center_x;
-        float delta_y = position_y - center_y;
-        float delta_z = position_z - center_z;
+    float delta_x = position_x - center_x;
+    float delta_y = position_y - center_y;
+    float delta_z = position_z - center_z;
 
-        int16_t delta_cells_x = static_cast<int16_t>(round(delta_x / RESOLUTION));
-        int16_t delta_cells_y = static_cast<int16_t>(round(delta_y / RESOLUTION));
-        int16_t delta_cells_z = 0;
+    int32_t delta_cells_x = static_cast<int32_t>(round(delta_x / MAP_RESOLUTION));
+    int32_t delta_cells_y = static_cast<int32_t>(round(delta_y / MAP_RESOLUTION));
 
-        center_x += delta_cells_x * RESOLUTION;
-        center_y += delta_cells_y * RESOLUTION;
-        center_z += delta_z;
+    center_x += delta_cells_x * MAP_RESOLUTION;
+    center_y += delta_cells_y * MAP_RESOLUTION;
+    center_z += delta_z;
 
-        if (delta_cells_x != 0 || delta_cells_y != 0) {
-            shift_map_xy_cuda(dev_elevation_map, dev_normal_map, dev_shift_temp, -delta_cells_x, -delta_cells_y);
-        }
-        if (fabsf(delta_z) > 1e-6f) {
-            shift_map_z_cuda(dev_elevation_map, -delta_z);
-        }
+    if (delta_cells_x != 0 || delta_cells_y != 0) {
+        shift_map_xy_cuda(dev_elevation_map, dev_normal_map, dev_shift_temp,
+                          -delta_cells_x, -delta_cells_y);
+    }
+    if (fabsf(delta_z) > 1e-6f) {
+        shift_map_z_cuda(dev_elevation_map, -delta_z);
+    }
 
-        // === Компенсация точек: переводим их в систему координат центра карты ===
-        float shift_x = position_x - center_x;
-        float shift_y = position_y - center_y;
-        float shift_z = position_z - center_z;
+    float shift_x = position_x - center_x;
+    float shift_y = position_y - center_y;
+    float shift_z = position_z - center_z;
 
-        std::vector<int16_t> points_shifted(size_pcl * 3);
-        for (uint32_t i = 0; i < size_pcl; i++) {
-            points_shifted[i*3+0] = lidar_pcl[i*3+0] + static_cast<int16_t>(shift_x * 1000.0f);
-            points_shifted[i*3+1] = lidar_pcl[i*3+1] + static_cast<int16_t>(shift_y * 1000.0f);
-            points_shifted[i*3+2] = lidar_pcl[i*3+2] + static_cast<int16_t>(shift_z * 1000.0f);
-        }
+    // ========================================================================
+    // ШАГ 3: Компенсация лидарных точек в систему координат центра карты
+    // ========================================================================
+    std::vector<float> points_shifted(size_pcl * 3);
+    for (uint32_t i = 0; i < size_pcl; i++) {
+        points_shifted[i*3+0] = lidar_pcl[i*3+0] + shift_x;
+        points_shifted[i*3+1] = lidar_pcl[i*3+1] + shift_y;
+        points_shifted[i*3+2] = lidar_pcl[i*3+2] + shift_z;
+    }
 
-        // === position_noise из одометрии ===
-        const float alpha_pos = 0.2f;   // position_lowpass_alpha из YAML
-        const float alpha_ori = 0.2f;   // orientation_lowpass_alpha из YAML
+    // ========================================================================
+    // ШАГ 4: position_noise / orientation_noise через lowpass
+    // ========================================================================
+    const float alpha_pos = 0.2f;
+    const float alpha_ori = 0.2f;
 
-        float qw = (float)odom.w, qx = (float)odom.x, qy = (float)odom.y, qz = (float)odom.z;
+    float qw = (float)odom.orientation.w(), qx = (float)odom.orientation.x();
+    float qy = (float)odom.orientation.y(), qz = (float)odom.orientation.z();
 
-        if (!lpf_init) {
-            lpf_x = position_x; lpf_y = position_y; lpf_z = position_z;
-            lpf_qw = qw; lpf_qx = qx; lpf_qy = qy; lpf_qz = qz;
-            lpf_init = true;
-        }
+    if (!lpf_init) {
+        lpf_x = position_x; lpf_y = position_y; lpf_z = position_z;
+        lpf_qw = qw; lpf_qx = qx; lpf_qy = qy; lpf_qz = qz;
+        lpf_init = true;
+    }
 
-        // position_noise — отклонение от lowpass
-        float pnx = position_x - lpf_x;
-        float pny = position_y - lpf_y;
-        float pnz = position_z - lpf_z;
-        float position_noise = sqrtf(pnx*pnx + pny*pny + pnz*pnz);
+    float pnx = position_x - lpf_x;
+    float pny = position_y - lpf_y;
+    float pnz = position_z - lpf_z;
+    float position_noise = sqrtf(pnx*pnx + pny*pny + pnz*pnz);
 
-        // orientation_noise — угол между текущим и lowpass-кватернионом
-        float dot = qw*lpf_qw + qx*lpf_qx + qy*lpf_qy + qz*lpf_qz;
-        dot = fminf(fmaxf(fabsf(dot), 0.0f), 1.0f);
-        float orientation_noise = 2.0f * acosf(dot);   // radians
+    float dot = qw*lpf_qw + qx*lpf_qx + qy*lpf_qy + qz*lpf_qz;
+    dot = fminf(fmaxf(fabsf(dot), 0.0f), 1.0f);
+    float orientation_noise = 2.0f * acosf(dot);
 
-        // Обновляем lowpass (после измерения ошибки)
-        lpf_x = alpha_pos * position_x + (1.0f - alpha_pos) * lpf_x;
-        lpf_y = alpha_pos * position_y + (1.0f - alpha_pos) * lpf_y;
-        lpf_z = alpha_pos * position_z + (1.0f - alpha_pos) * lpf_z;
-        lpf_qw = alpha_ori * qw + (1.0f - alpha_ori) * lpf_qw;
-        lpf_qx = alpha_ori * qx + (1.0f - alpha_ori) * lpf_qx;
-        lpf_qy = alpha_ori * qy + (1.0f - alpha_ori) * lpf_qy;
-        lpf_qz = alpha_ori * qz + (1.0f - alpha_ori) * lpf_qz;
-        float qnorm = sqrtf(lpf_qw*lpf_qw + lpf_qx*lpf_qx + lpf_qy*lpf_qy + lpf_qz*lpf_qz);
-        if (qnorm > 1e-6f) { lpf_qw /= qnorm; lpf_qx /= qnorm; lpf_qy /= qnorm; lpf_qz /= qnorm; }
+    lpf_x = alpha_pos * position_x + (1.0f - alpha_pos) * lpf_x;
+    lpf_y = alpha_pos * position_y + (1.0f - alpha_pos) * lpf_y;
+    lpf_z = alpha_pos * position_z + (1.0f - alpha_pos) * lpf_z;
+    lpf_qw = alpha_ori * qw + (1.0f - alpha_ori) * lpf_qw;
+    lpf_qx = alpha_ori * qx + (1.0f - alpha_ori) * lpf_qx;
+    lpf_qy = alpha_ori * qy + (1.0f - alpha_ori) * lpf_qy;
+    lpf_qz = alpha_ori * qz + (1.0f - alpha_ori) * lpf_qz;
+    float qnorm = sqrtf(lpf_qw*lpf_qw + lpf_qx*lpf_qx + lpf_qy*lpf_qy + lpf_qz*lpf_qz);
+    if (qnorm > 1e-6f) { lpf_qw /= qnorm; lpf_qx /= qnorm; lpf_qy /= qnorm; lpf_qz /= qnorm; }
 
-        // === Локальная позиция сенсора (робот в центре карты) ===
-        float sensor_pos[3] = { shift_x, shift_y, shift_z };
+    // ========================================================================
+    // ШАГ 5: Позиции сенсоров (лидар и камера) в системе центра карты
+    // ========================================================================
+    float sensor_pos_lidar[3] = { shift_x, shift_y, shift_z };
 
-        float h_min = 0.0f, h_max = 1.5f, rover_height_m = 0.0f;
+    float sensor_pos_cam[3] = { 0.0f, 0.0f, 0.0f };
+    uint32_t num_cam = 0;
 
-        process_costmap_cuda(points_shifted.data(), size_pcl, sensor_pos,
-                             dev_elevation_map, dev_new_map, dev_normal_map,
-                             dev_error, dev_error_cnt,
-                             dev_costmap, costmap, costmap_rgba,
-                             heightmap_packed,
-                             position_noise, orientation_noise,
-                             &h_min, &h_max, &rover_height_m);
+    if (has_camera && depth_data && total_voxels_frustum > 0 && points_cam_cpu) {
+        float R_bw[9];
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                R_bw[i*3 + j] = T_arr_16[i*4 + j];
 
-        // === Визуализация costmap ===
-        QImage img((const uchar*)costmap_rgba, 400, 400, QImage::Format_RGBA8888);
-        if (state == 2) DisplayingCostMap(img, QQuaternion(odom.w, -odom.y, odom.z, -odom.x));
+        float t_cam_base[3] = { Translation[0], Translation[1], Translation[2] };
+        sensor_pos_cam[0] = shift_x + R_bw[0]*t_cam_base[0] + R_bw[1]*t_cam_base[1] + R_bw[2]*t_cam_base[2];
+        sensor_pos_cam[1] = shift_y + R_bw[3]*t_cam_base[0] + R_bw[4]*t_cam_base[1] + R_bw[5]*t_cam_base[2];
+        sensor_pos_cam[2] = shift_z + R_bw[6]*t_cam_base[0] + R_bw[7]*t_cam_base[1] + R_bw[8]*t_cam_base[2];
+    }
 
-        // === Визуализация heightmap ===
-        if (state == 0) emit DisplayingHeightMap(heightmap_packed, h_min, h_max, rover_height_m, QQuaternion(odom.w, -odom.y, odom.z, -odom.x));
+    // ========================================================================
+    // ШАГ 6: Депроекция глубины в точки (если есть камера)
+    // ========================================================================
+    if (has_camera && depth_data && total_voxels_frustum > 0 && points_cam_cpu) {
+        float R_bw[9];
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                R_bw[i*3 + j] = T_arr_16[i*4 + j];
 
-        // === Планировщик ===
-        state_lattice_->updateCostmapFromData(costmap);
+        float shift_arr[3] = { shift_x, shift_y, shift_z };
+
+        deproject_depth_cuda(
+            points_cam_cpu, &num_cam,
+            total_voxels_frustum,
+            intrinsics_depth,
+            depth_data,
+            depth_scale,
+            Rotation_matrix, Translation,
+            R_bw, shift_arr);
+    }
+
+    // ========================================================================
+    // ШАГ 7: process_costmap_cuda — два источника точек
+    // ========================================================================
+    float h_min = 0.0f, h_max = 1.5f, rover_height_m = 0.0f;
+
+    process_costmap_cuda(
+        points_shifted.data(), (int)size_pcl, sensor_pos_lidar,
+        has_camera ? points_cam_cpu : nullptr, (int)num_cam, sensor_pos_cam,
+        dev_elevation_map, dev_new_map, dev_normal_map,
+        dev_error, dev_error_cnt,
+        dev_costmap, costmap, costmap_rgba, heightmap_packed,
+        position_noise, orientation_noise,
+        &h_min, &h_max, &rover_height_m);
+
+    // ========================================================================
+    // ШАГ 8: Визуализация
+    // ========================================================================
+    QImage img((const uchar*)costmap_rgba, 400, 400, QImage::Format_RGBA8888);
+
+    if (state == 2) DisplayingCostMap(img, odom.orientation);
+    if (state == 0) emit DisplayingHeightMap(heightmap_packed, h_min, h_max, rover_height_m, odom.orientation);
+
+    // ========================================================================
+    // ШАГ 9: Планировщик
+    // ========================================================================
+    state_lattice_->updateCostmapFromData(costmap);
 }
 
 void Processor::ArucoTrackerIn(std::vector<std::vector<cv::Point2f>> corners)
@@ -291,14 +365,14 @@ void Processor::ArucoTrackerIn(std::vector<std::vector<cv::Point2f>> corners)
 
     //std::cout << "Translation: " << tvecs[0] << "\tRotation: " << rvecs[0] << "\n";
 
-    if(state == 0) DrawAruco(QVector3D(Aruco_point[0] + 199.0f, -Aruco_point[1] - 49.0f, -Aruco_point[2] - 199.0f));
+    if(state == 0) DrawAruco(Eigen::Vector3f(Aruco_point[0] + 199.0f, -Aruco_point[1] - 49.0f, -Aruco_point[2] - 199.0f));
 
-    if(state == 2) DrawAruco(QVector3D(Aruco_point[0] + 199.0f, -Aruco_point[1] - 49.0f, -Aruco_point[2] - 199.0f));
+    if(state == 2) DrawAruco(Eigen::Vector3f(Aruco_point[0] + 199.0f, -Aruco_point[1] - 49.0f, -Aruco_point[2] - 199.0f));
 
-    float robot_x = Map_center_X;
-    float robot_z = Map_center_Y;
-    float marker_x = Aruco_point[0] + Map_center_X;
-    float marker_z = Aruco_point[2] + Map_center_Y;
+    float robot_x = MAP_CENTER;
+    float robot_z = MAP_CENTER;
+    float marker_x = Aruco_point[0] + MAP_CENTER;
+    float marker_z = Aruco_point[2] + MAP_CENTER;
 
     float dx = marker_x - robot_x;
     float dz = marker_z - robot_z;
@@ -338,8 +412,8 @@ void Processor::ArucoTrackerIn(std::vector<std::vector<cv::Point2f>> corners)
 
 void Processor::Finding_start_end_of_the_map_2d(float target_pos_x, float target_pos_y, float target_yaw)
 {
-    unsigned int start_x = Map_center_X;
-    unsigned int start_y = Map_center_Y;
+    unsigned int start_x = MAP_CENTER;
+    unsigned int start_y = MAP_CENTER;
     unsigned int goal_x = static_cast<unsigned int>(target_pos_x);
     unsigned int goal_y = static_cast<unsigned int>(target_pos_y);
 
@@ -638,6 +712,9 @@ void Processor::run()
 
    costmap_rgba = new uint32_t[160000];   // 640 КБ
 
+   total_voxels_frustum = init_frustum_cuda(intrinsics_depth);
+   points_cam_cpu = new float[total_voxels_frustum * 3];   // ← один раз
+
    cv::Mat Color;
 
    rs2::frame pending_depth_frame;
@@ -716,6 +793,7 @@ void Processor::run()
 void Processor::odometry_lidar(odometry data)
 {
   odom = data;
+
 }
 
 

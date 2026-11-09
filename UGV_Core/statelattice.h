@@ -50,7 +50,7 @@ signals:
                            float resolution, float origin_x, float origin_y);
 
        // Сигнал для OpenGL визуализации
-       void DrawLines(GLfloat* vertices_buffer, QVector3D color_buffer, unsigned long long counter, uint16_t index);
+       void DrawLines(GLfloat* vertices_buffer, Eigen::Vector3f color_buffer, unsigned long long counter, uint16_t index);
 
 public slots:
 
@@ -78,8 +78,8 @@ private:
     uint32_t output_vertices_path_size = 0;
     uint8_t ptr_guard_output_vertices_path = 0;
 
-    const QVector3D green = QVector3D(0.0f, 1.0f, 0.0f);
-    const QVector3D blue = QVector3D(0.0f, 0.0f, 1.0f);
+    const Eigen::Vector3f green = Eigen::Vector3f(0.0f, 1.0f, 0.0f);
+    const Eigen::Vector3f blue  = Eigen::Vector3f(0.0f, 0.0f, 1.0f);
 
     std::vector<std::tuple<float, float, float>> expansions_;
 

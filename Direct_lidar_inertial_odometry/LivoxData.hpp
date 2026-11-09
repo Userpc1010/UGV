@@ -8,6 +8,8 @@
 #include <limits.h>
 #include <cmath>
 #include <stdexcept>
+#include <Eigen/Core>
+#include <Eigen/Geometry>
 
 template<class T>
  class TimeBase
@@ -118,7 +120,7 @@ typedef struct Msg
 
 typedef struct ImuConst
 {
-    ImuConst(): header(),angular_velocity(), linear_acceleration()
+    ImuConst(): header(), linear_acceleration(), angular_velocity()
     {
     }
     ~ImuConst(){}
@@ -148,28 +150,17 @@ typedef struct ImuConst
 
  typedef struct odometry_lidar
  {
-   double timestamp = 0.0;
+    double timestamp = 0.0;
 
-   double x_pos = 0.0;
-   double y_pos = 0.0;
-   double z_pos = 0.0;
+    // Точные типы из DLIO (float)
+    Eigen::Vector3f position = Eigen::Vector3f::Zero();
+    Eigen::Vector3f velocity = Eigen::Vector3f::Zero();
+    Eigen::Quaternionf orientation = Eigen::Quaternionf::Identity();
 
-   double x_vel = 0.0;
-   double y_vel = 0.0;
-   double z_vel = 0.0;
+    // Конструктор по умолчанию
+    odometry_lidar() = default;
 
-   double c_pose_covariance [36] = {0.0};
-
-   double w=1.0,x=0.0,y=0.0,z=0.0;
-
-   odometry_lidar(double w_ = 1.0,double x_ = 0.0, double y_ = 0.0,double z_ = 0.0)
-   {
-     w=w_;
-     x=x_;
-     y=y_;
-     z=z_;
-   }
- }odometry;
+ } odometry;
 
 /** 8bytes stamp to uint64_t stamp */
 typedef union {

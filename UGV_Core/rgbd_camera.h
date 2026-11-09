@@ -7,6 +7,7 @@
 #include <librealsense2-gl/rs_processing_gl.hpp> // Include GPU-Processing API
 #include <librealsense2/rsutil.h>
 #include "LivoxData.hpp"
+#include "map_config.h"
 #include "nav2_costmap_2d/raytrace_line_2d.hpp"
 #include "statelattice.h"
 #include <opencv2/core.hpp>
@@ -30,27 +31,6 @@
 #define Quat_PI 3.1415926535897932384626433832795f
 #define Quat_TWOPI 6.283185307179586476925286766559f
 #define Quat_TODEG(x) ((x) * 57.2957796f)
-
-#define MAP_CELL_N 400
-#define MAP_CELLS  160000  // 400 * 400
-#define MAP_LAYERS 7
-
-// Индексы слоёв в dev_elevation_map (каждый слой — 400x400 float)
-#define L_HEIGHT      0   // Высота (Z в DLIO)
-#define L_VARIANCE    1   // Дисперсия (для Калмана)
-#define L_IS_VALID    2   // Флаг валидности (1.0 = валидно)
-#define L_TRAVERS     3   // Проходимость (0..1)
-#define L_TIME        4   // Время с последнего обновления
-#define L_UPPER_BOUND 5   // Верхняя граница (для нависающих препятствий)
-#define L_IS_UPPER    6   // Флаг: 1.0 = граница, 0.0 = земля
-
-// Оставляем для costmap и min/max
-#define Map_X 400
-#define Map_Y 400
-#define Map_center_X 200
-#define Map_center_Y 200
-
-#define Map_scale 10.0f
 
 typedef struct {
     float r = 0.0, g = 0.0, b = 0.0;
@@ -80,11 +60,16 @@ public:
  float *heightmap_packed;     // CPU-копия упакованного heightmap float[400*200]
  float * dev_shift_temp;      // Временный буфер для сдига карты
  uint32_t* costmap_rgba;     // CPU-копия RGBA для QImage
+ float* points_cam_cpu;
 
 private:
 
- const float Rotation_matrix[9] = {0.999048f, 0.018916f, -0.0393044f, 0.0f, 0.901077f, -0.433659f, 0.0436194f, 0.433246f, 0.900219f};
- const float Translation[3] = {-0.005f, 0.089f, 0.055f}; //Ваше старое значение было -0.065. Когда мы прибавили к нему +0.06 (В вашем выводе из SDK было четко сказано: Tbc = 0.005), мы получили -0.025.
+ const float Rotation_matrix[9] = {
+     -0.0507168f, -0.998706f,  -0.00379343f,
+     -0.448145f,   0.026152f,  -0.893578f,
+      0.892521f,  -0.0436194f, -0.448891f
+ };
+ const float Translation[3] = {0.065f, 0.075f, -0.055f}; //Ваше старое значение было -0.065. Когда мы прибавили к нему +0.06 (В вашем выводе из SDK было четко сказано: Tbc = 0.005), мы получили -0.025.
 
  //ArucoPosition
  float Aruco_point[3] = {0};
@@ -117,6 +102,8 @@ private:
  // Declare object that handles camera pose calculations
 
  odometry odom;
+
+ uint32_t total_voxels_frustum = 0;
 
  // Центр карты в мировых координатах (аналог self.center в elevation_mapping_cupy)
  float center_x = 0.0f;
@@ -180,31 +167,31 @@ protected:
 
  signals:
 
- void DisplayingCostMap(const QImage &map, QQuaternion rotation);
+ void DisplayingCostMap(const QImage &map, Eigen::Quaternionf rotation);
 
  void Invisible_Aruco (bool invisible);
 
- void DrawAruco (QVector3D pos);
+ void DrawAruco (Eigen::Vector3f pos);
 
  void ArucoTrackerOut(std::vector<std::vector<cv::Point2f>> corners);
 
- void DisplayingHeightMap(const float *data, float min, float max, float targetHeight, QQuaternion rotation);
+ void DisplayingHeightMap(const float *data, float min, float max, float targetHeight, Eigen::Quaternionf rotation);
 
- void updateMapOffset(QVector3D offset);
+ void updateMapOffset(Eigen::Vector3f offset);
 
- void DrawCube(QVector3D pos);
+ void DrawCube(Eigen::Vector3f pos);
 
  void camsync(double time);
 
 public slots:
 
-   void point_cloud_lidar (const int16_t * keyframe_pcl, uint32_t size_keyframe, const int16_t * lidar_pcl, uint32_t size_pcl);
+  void point_cloud_lidar(const float* keyframe_pcl, uint32_t size_keyframe, const float* lidar_pcl, uint32_t size_pcl, const float* T_arr_16);
 
-   void ArucoTrackerIn (std::vector<std::vector<cv::Point2f>> corners);
+  void ArucoTrackerIn (std::vector<std::vector<cv::Point2f>> corners);
 
    void odometry_lidar (odometry data);
 
-   void goalPositionSet(QVector3D position, QQuaternion rotation);
+   void goalPositionSet(Eigen::Vector3f position, Eigen::Quaternionf rotation);
 
    void WindowState (uint8_t state);
 

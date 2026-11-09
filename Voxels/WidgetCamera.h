@@ -2,7 +2,8 @@
 #define WIDGETCAMERA_H
 
 #include "oglwidgetbase.h"
-#include <QQuaternion>
+#include <Eigen/Dense>
+#include <Eigen/Geometry>
 
 class Cube;
 class HeightMapRenderer;
@@ -18,17 +19,16 @@ public:
     ~WidgetCamera();
 
 public slots:
-    void DisplayingHeightMap(const float* data, float min, float max, float targetHeight,  QQuaternion rotation);
-    void DrawAruco(QVector3D pos);
+    void DisplayingHeightMap(const float* data, float min, float max, float targetHeight,  Eigen::Quaternionf rotation);
+    void DrawAruco(Eigen::Vector3f pos);
     void Invisible_Aruco(bool invisible);
     void Drone_scale(float s);
 
-    void DrawLines(GLfloat* vertices_buffer, QVector3D color_buffer,
-                   uint32_t counter, uint16_t index);
-    void DrawCube(QVector3D pos);
+    void DrawLines(GLfloat* vertices_buffer, Eigen::Vector3f color_buffer, unsigned long long counter, uint16_t index);
+    void DrawCube(Eigen::Vector3f pos);
     void ClearLine();
 
-    void updateMapOffset (QVector3D offset);
+    void updateMapOffset(Eigen::Vector3f offset);
 
 protected:
     void initializeSpecific() override;

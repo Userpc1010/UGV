@@ -6,12 +6,11 @@ Camera_3D::Camera_3D(QVector3D init_pos)
 {
     front = QVector3D(0.0f, 0.0f, -1.0f); // По умолчанию смотрим по оси -Z
 
-    m_Translate = init_pos + QVector3D(0.0f, 10.0f, 0.0f);
+    m_Translate = init_pos + QVector3D(-10.0f, 10.0f, 0.0f);
 
     m_camera_up =  QVector3D( 0.0f, 1.0f, 0.0f );
 
     pitch = -45.0;
-    yaw =   -90.0; // Смотрим по -Z
 
     // Пересчитываем front из углов
     front.setX(qCos(qDegreesToRadians(yaw)) * qCos(qDegreesToRadians(pitch)));
@@ -33,6 +32,7 @@ void Camera_3D::draw(QOpenGLShaderProgram *program, QOpenGLFunctions_4_5_Core *f
 
 void Camera_3D::rotate_camera(double x, double y)
 {
+
   yaw += (x * sensitivity_x); pitch += (y * sensitivity_y);
 
   if(pitch > 89.99)  pitch = 89.99;
@@ -66,11 +66,13 @@ QMatrix4x4 Camera_3D::ViewMatrix()
 void Camera_3D::SetPositionCamera(QVector3D pos)
 {
   m_Translate += pos;
+
 }
 
 void Camera_3D::Front_move()
 {
   m_Translate += front * 5;
+
 }
 
 void Camera_3D::Back_move()
@@ -81,6 +83,7 @@ void Camera_3D::Back_move()
 void Camera_3D::right_move()
 {
   m_Translate -=  QVector3D::crossProduct(front, m_camera_up).normalized();
+
 }
 
 void Camera_3D::left_move()
@@ -92,6 +95,7 @@ void Camera_3D::left_move()
 void Camera_3D::Up_move()
 {
   m_Translate += m_camera_up;
+
 }
 
 void Camera_3D::Down_move()

@@ -2,7 +2,8 @@
 #define WIDGETLIDAR_H
 
 #include "oglwidgetbase.h"
-#include <QQuaternion>
+#include <Eigen/Dense>
+#include <Eigen/Geometry>
 
 class PointRender;
 
@@ -16,8 +17,8 @@ public:
 
 public slots:
     void DisplayingPoint(GLfloat* vertices_buffer, GLfloat* color_buffer,
-                        unsigned long long counter, QQuaternion rotation,
-                        QVector3D translation);
+                        unsigned long long counter, Eigen::Quaternionf rotation,
+                        Eigen::Vector3f translation);
     void DisplayingMapPoint(GLfloat* vertices_buffer, GLfloat* color_buffer,
                            unsigned long long counter);
 

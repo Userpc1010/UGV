@@ -3,6 +3,7 @@
 #include <QOpenGLTexture>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLFunctions_4_5_Core>
+#include <oglwidgetbase.h>
 
 SimpleObject3D::SimpleObject3D()
     : m_VertexBuffer(QOpenGLBuffer::VertexBuffer),
@@ -11,6 +12,8 @@ SimpleObject3D::SimpleObject3D()
 {
  m_Scale = 1.0f;
  m_ApplyMapOffset = true;
+ m_Rotate = Eigen::Quaternionf::Identity();
+ m_Translate = Eigen::Vector3f::Zero();
 }
 
 SimpleObject3D::SimpleObject3D(const QVector<VertexData> &vert, const QVector<GLuint> &ind, const QImage &img)
@@ -20,6 +23,8 @@ SimpleObject3D::SimpleObject3D(const QVector<VertexData> &vert, const QVector<GL
 {
     m_Scale = 1.0f;
     init(vert, ind, img);
+    m_Rotate = Eigen::Quaternionf::Identity();
+    m_Translate = Eigen::Vector3f::Zero();
 }
 
 SimpleObject3D::~SimpleObject3D()
@@ -59,12 +64,30 @@ void SimpleObject3D::draw(QOpenGLShaderProgram *program, QOpenGLFunctions_4_5_Co
 {
     if(!m_VertexBuffer.isCreated() || !m_IndexBuffer.isCreated()) return;
 
-    QMatrix4x4 modelMatrix;
-    modelMatrix.setToIdentity();
-    modelMatrix.translate(m_Translate); //
-    modelMatrix.rotate(m_Rotate); // *
-    modelMatrix.scale(m_Scale); // *
-    modelMatrix = m_GlobalTransform * modelMatrix;
+    // 1. Прямой прогон через настроенный DlioFrame
+    // Больше никаких локальных R_yawfix в основном коде — всё скрыто внутри!
+    Eigen::Matrix3f R_odom = DlioFrame::rot(m_Rotate.toRotationMatrix());
+    Eigen::Vector3f t_odom = DlioFrame::vec(m_Translate);
+
+    // 2. Сборка локальной матрицы T
+    Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
+    T.block<3,3>(0,0) = R_odom * m_Scale;
+    T.block<3,1>(0,3) = t_odom;
+
+    // 3. Умножение на глобальную матрицу
+    Eigen::Matrix4f G = Eigen::Matrix4f::Identity();
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            G(i,j) = m_GlobalTransform(i,j);
+
+    Eigen::Matrix4f final = G * T;
+
+    QMatrix4x4 modelMatrix(
+        final(0,0), final(0,1), final(0,2), final(0,3),
+        final(1,0), final(1,1), final(1,2), final(1,3),
+        final(2,0), final(2,1), final(2,2), final(2,3),
+        final(3,0), final(3,1), final(3,2), final(3,3)
+    );
 
     program->setUniformValue("r_id", 0);
     program->setUniformValue("p_id", 0);
@@ -95,18 +118,17 @@ void SimpleObject3D::draw(QOpenGLShaderProgram *program, QOpenGLFunctions_4_5_Co
     m_Texture->release();
 }
 
-
-void SimpleObject3D::rotate(const QQuaternion &r)
+void SimpleObject3D::rotate(const Eigen::Quaternionf &r)
 {
-    m_Rotate = r;
+  m_Rotate = r;
 }
 
-void SimpleObject3D::translate(const QVector3D &t)
+void SimpleObject3D::translate(const Eigen::Vector3f &t)
 {
-    m_Translate = t;
+  m_Translate = t;
 }
 
-void SimpleObject3D::offset(const QVector3D &t)
+void SimpleObject3D::offset(const Eigen::Vector3f &t)
 {
   m_Translate += t;
 }

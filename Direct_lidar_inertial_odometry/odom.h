@@ -44,10 +44,10 @@ public slots:
 
 signals:
 
-  void point_cloud_lidar (const int16_t * keyframe_pcl, uint32_t size_keyframe, const int16_t * lidar_pcl, uint32_t size_pcl);
+  void point_cloud_lidar(const float * keyframe_pcl, uint32_t size_keyframe, const float * lidar_pcl, uint32_t size_pcl, const float* T_arr_16);   // row-major 4×4
 
   void odometry_lidar (odometry data);
-  void DisplayingPoint(GLfloat* vertices_buffer, GLfloat* color_buffer, unsigned long long counter, QQuaternion rotation, QVector3D translation);
+  void DisplayingPoint(GLfloat* vertices_buffer, GLfloat* color_buffer, unsigned long long counter, Eigen::Quaternionf rotation, Eigen::Vector3f translation);
   void DisplayingPointMap(GLfloat* vertices_buffer, GLfloat* color_buffer, unsigned long long counter);
 
 private:
@@ -61,8 +61,8 @@ private:
 
   void publishPose();
 
-  void publishToROS(pcl::PointCloud<PointType>::ConstPtr published_cloud, Eigen::Matrix4f T_cloud);
-  void publishCloud(pcl::PointCloud<PointType>::ConstPtr published_cloud, Eigen::Matrix4f T_cloud);
+  void publishToROS(pcl::PointCloud<PointType>::ConstPtr published_cloud, Eigen::Matrix4f T_cloud, Eigen::Matrix4f T_global);
+  void publishCloud(pcl::PointCloud<PointType>::ConstPtr published_cloud, Eigen::Matrix4f T_cloud, Eigen::Matrix4f T_global);
   void publishKeyframe(std::pair<std::pair<Eigen::Vector3f, Eigen::Quaternionf>,
                        pcl::PointCloud<PointType>::ConstPtr> kf);
 
@@ -147,9 +147,9 @@ private:
   GLfloat * color_data_Map;
   bool ptr_guard_color_data_Map = false;
 
-  int16_t * keyframe_pcl_data_lidar;
+  float * keyframe_pcl_data_lidar = nullptr;
   bool ptr_guard_keyframe_pcl_data_lidar = false;
-  int16_t * current_scan_pcl_data_lidar;
+  float * current_scan_pcl_data_lidar = nullptr;
   bool ptr_guard_current_scan_pcl_data_lidar = false;
 
   uint32_t keyframe_size;

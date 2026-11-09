@@ -2,7 +2,8 @@
 #define CAMERA_3D_H
 
 #include "simpleobject3d.h"
-#include <QQuaternion>
+#include <Eigen/Dense>
+#include <Eigen/Geometry>
 #include <QVector3D>
 #include <QMatrix4x4>
 
