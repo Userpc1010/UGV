@@ -118,3 +118,8 @@ cuda.input           = CUDA_SOURCES
 cuda.output          = ${OBJECTS_DIR}${QMAKE_FILE_BASE}_cuda.o
 # Tell Qt that we want add more stuff to the Makefile
 QMAKE_EXTRA_COMPILERS += cuda
+
+unix:!macx: LIBS += -L$$OUT_PWD/../M-detector/ -lM_detector
+
+INCLUDEPATH += $$PWD/../M-detector
+DEPENDPATH += $$PWD/../M-detector

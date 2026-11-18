@@ -6,11 +6,14 @@ greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 TARGET = Voxels
 TEMPLATE = lib
 
+CONFIG += c++17
+
 QMAKE_CXXFLAGS += -O3
 
 SOURCES += \
     WidgetCamera.cpp \
     WidgetCostMap.cpp \
+    WidgetDynamic.cpp \
     WidgetLidar.cpp \
     costmap2d.cpp \
     oglwidgetbase.cpp \
@@ -26,6 +29,7 @@ SOURCES += \
 HEADERS += \
     WidgetCamera.h \
     WidgetCostMap.h \
+    WidgetDynamic.h \
     WidgetLidar.h \
     costmap2d.h \
     oglwidgetbase.h \

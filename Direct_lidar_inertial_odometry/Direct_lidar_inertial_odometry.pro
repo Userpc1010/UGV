@@ -1,4 +1,5 @@
 QT += core
+QT -= gui
 
 TEMPLATE = lib
 DEFINES += DLIO_LIBRARY

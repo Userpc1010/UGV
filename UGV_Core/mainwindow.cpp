@@ -18,6 +18,11 @@ MainWindow::MainWindow(QWidget *parent) :
 //  std::string config_path = "/home/sencis/build-UGV-Desktop-Debug/UAV_Core/estimator_config.yaml";
   std::string config_path = "/home/sencis/build-UGV-Desktop-Debug/FAST-LIO2/MID360_config.json";
 
+  thread_MDetector = new QThread(this);
+  mdetector = new MDetectorNode(nullptr);
+  mdetector->moveToThread(thread_MDetector);
+  thread_MDetector->start(QThread::HighPriority);
+
   thread_Lidar = new QThread(this);
   SDK = new LivoxSDK(config_path, nullptr);
   SDK->moveToThread(thread_Lidar);
@@ -33,16 +38,21 @@ MainWindow::MainWindow(QWidget *parent) :
 
   widgetCamera = new WidgetCamera(this);
   widgetLidar = new WidgetLidar(this);
+  widgetDynamic = new WidgetDynamic(this);
   widgetCostMap = new WidgetCostMap(this);
+
 
   stackedWidget = new QStackedWidget(this);
 
   stackedWidget->addWidget(widgetCamera);
   stackedWidget->addWidget(widgetLidar);
+  stackedWidget->addWidget(widgetDynamic);
   stackedWidget->addWidget(widgetCostMap);
+
 
   stackedWidget->setFocusPolicy(Qt::StrongFocus);
   widgetLidar->setFocusPolicy(Qt::StrongFocus);
+  widgetDynamic->setFocusPolicy(Qt::StrongFocus);
   widgetCamera->setFocusPolicy(Qt::StrongFocus);
   widgetCostMap->setFocusPolicy(Qt::StrongFocus);
   this->setFocusPolicy(Qt::StrongFocus);
@@ -106,7 +116,11 @@ MainWindow::MainWindow(QWidget *parent) :
 
     connect(this, SIGNAL(destroyed(QObject*)),                                                                                                   thread_Processor, SLOT(quit()));
 
-    connect(&SDK->Node, SIGNAL(point_cloud_lidar(const float*, uint32_t, const float*, uint32_t, const float*)),                                 processor, SLOT(point_cloud_lidar(const float*, uint32_t, const float*, uint32_t, const float*)));
+    connect(&SDK->Node, SIGNAL(point_cloud_lidar(const float*, uint32_t, const float*, double)),                                                 mdetector, SLOT(onPointCloud(const float*, uint32_t, const float*, double)));
+
+    connect(mdetector, SIGNAL(staticPointsReady(const float*, uint32_t, const float*)),                                                          processor, SLOT(point_cloud_lidar(const float*, uint32_t, const float*)));
+
+    connect(mdetector, SIGNAL(dynamicPointsReady(const float*, uint32_t, const float*)),                                                         widgetDynamic, SLOT(DisplayingDynamicPoints(const float*, uint32_t, const float*)));
 
     connect(&SDK->Node, SIGNAL(odometry_lidar(odometry)),                                                                                        processor,SLOT(odometry_lidar(odometry)));
 
@@ -149,6 +163,8 @@ MainWindow::MainWindow(QWidget *parent) :
     connect(this, SIGNAL(ModeChanged(uint8_t)),                                                                                                  controller, SLOT(onModeChanged(uint8_t)));
 
     connect(this, SIGNAL(WindowState(uint8_t)),                                                                                                  &SDK->Node, SLOT(WindowState(uint8_t)));
+
+    connect(this, SIGNAL(WindowState(uint8_t)),                                                                                                  mdetector, SLOT(WindowState(uint8_t)));
 
 
 }
@@ -202,22 +218,10 @@ void MainWindow::send_telem(GUI_telem data)
 
 void MainWindow::on_pushButton_Widget_clicked()
 {
-    if(state > 2) state = 0;
-    if(state == 0) {
-     stackedWidget->setCurrentIndex(state);
-     emit WindowState(state);
-    }
-
-    if(state == 1) {
-     stackedWidget->setCurrentIndex(state);
-     emit WindowState(state);
-    }
-    if(state == 2){
-     stackedWidget->setCurrentIndex(state);
-     emit WindowState(state);
-     this->resize(800, 1080);
-    }
-
+    if(state > 3) state = 0;
+    stackedWidget->setCurrentIndex(state);
+    emit WindowState(state);
+    if(state == 2) this->resize(800, 1080);
     state++;
 }
 

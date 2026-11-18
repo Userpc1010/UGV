@@ -8,6 +8,8 @@
 #include "WidgetCamera.h"
 #include "WidgetLidar.h"
 #include "WidgetCostMap.h"
+#include "WidgetDynamic.h"
+#include "MDetectorNode.h"
 #include "rgbd_camera.h"
 #include "quadbike_controller.h"
 #include "livoxsdk.h"
@@ -48,17 +50,20 @@ private:
     QThread * thread_server;
     QThread * thread_Lidar;
     QThread * thread_map;
+    QThread * thread_MDetector;
 
     Processor * processor;
     quadbike_controller * controller;
     LivoxSDK * SDK;
     TcpServer * Server;
+    MDetectorNode * mdetector;
 
     Ui::MainWindow *ui;
     QStackedWidget * stackedWidget;
     WidgetCostMap * widgetCostMap;
     WidgetCamera * widgetCamera;
     WidgetLidar * widgetLidar;
+    WidgetDynamic * widgetDynamic;
 
 private slots:
 

@@ -1661,9 +1661,9 @@ void deproject_depth_cuda(
     // ========================================================================
     // ПАРАМЕТРЫ
     // ========================================================================
-    const int border_top    = 50;
+    const int border_top    = 70;
     const int border_bottom = 0;
-    const int border_left   = 50;
+    const int border_left   = 85;
     const int border_right  = 20;
 
     const int count = intrin.height * intrin.width;

@@ -185,9 +185,9 @@ protected:
 
 public slots:
 
-  void point_cloud_lidar(const float* keyframe_pcl, uint32_t size_keyframe, const float* lidar_pcl, uint32_t size_pcl, const float* T_arr_16);
+   void point_cloud_lidar(const float* lidar_pcl, uint32_t size_pcl, const float* T_arr_16);
 
-  void ArucoTrackerIn (std::vector<std::vector<cv::Point2f>> corners);
+   void ArucoTrackerIn (std::vector<std::vector<cv::Point2f>> corners);
 
    void odometry_lidar (odometry data);
 

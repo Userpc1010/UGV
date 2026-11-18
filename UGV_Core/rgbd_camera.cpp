@@ -167,9 +167,7 @@ void Processor::timesync(uint64_t timebase, uint64_t time)
     }
 }
 
-void Processor::point_cloud_lidar(const float * keyframe_pcl, uint32_t size_keyframe,
-                                  const float * lidar_pcl, uint32_t size_pcl,
-                                  const float* T_arr_16)
+void Processor::point_cloud_lidar(const float* lidar_pcl, uint32_t size_pcl, const float* T_arr_16)
 {
     // ========================================================================
     // ШАГ 1: Забрать синхронизированный кадр камеры (retry ~10 мс)
@@ -201,9 +199,16 @@ void Processor::point_cloud_lidar(const float * keyframe_pcl, uint32_t size_keyf
     // ШАГ 2: Сдвиг карты под новую позицию робота
     // ========================================================================
 
-    float position_x = static_cast<float>(odom.position.x());
-    float position_y = static_cast<float>(odom.position.y());
-    float position_z = static_cast<float>(odom.position.z());
+    Eigen::Matrix4f T;
+        for (int i = 0; i < 4; i++)
+            for (int j = 0; j < 4; j++)
+                T(i, j) = T_arr_16[i*4 + j];
+    Eigen::Vector3f position = T.block<3,1>(0,3);
+    Eigen::Quaternionf orientation(T.block<3,3>(0,0));
+
+    float position_x = position.x();
+    float position_y = position.y();
+    float position_z = position.z();
 
     float delta_x = position_x - center_x;
     float delta_y = position_y - center_y;
@@ -244,8 +249,8 @@ void Processor::point_cloud_lidar(const float * keyframe_pcl, uint32_t size_keyf
     const float alpha_pos = 0.2f;
     const float alpha_ori = 0.2f;
 
-    float qw = (float)odom.orientation.w(), qx = (float)odom.orientation.x();
-    float qy = (float)odom.orientation.y(), qz = (float)odom.orientation.z();
+    float qw = orientation.w(), qx = orientation.x();
+    float qy = orientation.y(), qz = orientation.z();
 
     if (!lpf_init) {
         lpf_x = position_x; lpf_y = position_y; lpf_z = position_z;
@@ -332,8 +337,8 @@ void Processor::point_cloud_lidar(const float * keyframe_pcl, uint32_t size_keyf
     // ========================================================================
     QImage img((const uchar*)costmap_rgba, 400, 400, QImage::Format_RGBA8888);
 
-    if (state == 2) DisplayingCostMap(img, odom.orientation);
-    if (state == 0) emit DisplayingHeightMap(heightmap_packed, h_min, h_max, rover_height_m, odom.orientation);
+    if (state == 3) DisplayingCostMap(img, orientation);
+    if (state == 0) emit DisplayingHeightMap(heightmap_packed, h_min, h_max, rover_height_m, orientation);
 
     // ========================================================================
     // ШАГ 9: Планировщик
@@ -367,7 +372,7 @@ void Processor::ArucoTrackerIn(std::vector<std::vector<cv::Point2f>> corners)
 
     if(state == 0) DrawAruco(Eigen::Vector3f(Aruco_point[0] + 199.0f, -Aruco_point[1] - 49.0f, -Aruco_point[2] - 199.0f));
 
-    if(state == 2) DrawAruco(Eigen::Vector3f(Aruco_point[0] + 199.0f, -Aruco_point[1] - 49.0f, -Aruco_point[2] - 199.0f));
+    if(state == 3) DrawAruco(Eigen::Vector3f(Aruco_point[0] + 199.0f, -Aruco_point[1] - 49.0f, -Aruco_point[2] - 199.0f));
 
     float robot_x = MAP_CENTER;
     float robot_z = MAP_CENTER;
@@ -765,7 +770,7 @@ void Processor::run()
 
       if(state == 0) emit Invisible_Aruco(false);
 
-      if(state == 2) emit Invisible_Aruco(false);
+      if(state == 3) emit Invisible_Aruco(false);
 
       emit ArucoTrackerOut(corners);
 
@@ -775,7 +780,7 @@ void Processor::run()
 
        if(state == 0) emit Invisible_Aruco(true);
 
-       if(state == 2) emit Invisible_Aruco(true);
+       if(state == 3) emit Invisible_Aruco(true);
      }
      }
 

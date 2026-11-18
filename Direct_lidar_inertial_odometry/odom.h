@@ -17,8 +17,6 @@
 #include "LivoxData.hpp"
 #include "dlio.h"
 #include <QObject>
-#include <QQuaternion>
-#include <QVector3D>
 
 typedef struct {
     float r = 0.0, g = 0.0, b = 0.0;
@@ -44,7 +42,7 @@ public slots:
 
 signals:
 
-  void point_cloud_lidar(const float * keyframe_pcl, uint32_t size_keyframe, const float * lidar_pcl, uint32_t size_pcl, const float* T_arr_16);   // row-major 4×4
+  void point_cloud_lidar(const float* lidar_pcl, uint32_t size_pcl, const float* T_arr_16, double scan_stamp);   // row-major 4×4
 
   void odometry_lidar (odometry data);
   void DisplayingPoint(GLfloat* vertices_buffer, GLfloat* color_buffer, unsigned long long counter, Eigen::Quaternionf rotation, Eigen::Vector3f translation);
@@ -147,12 +145,8 @@ private:
   GLfloat * color_data_Map;
   bool ptr_guard_color_data_Map = false;
 
-  float * keyframe_pcl_data_lidar = nullptr;
-  bool ptr_guard_keyframe_pcl_data_lidar = false;
   float * current_scan_pcl_data_lidar = nullptr;
   bool ptr_guard_current_scan_pcl_data_lidar = false;
-
-  uint32_t keyframe_size;
 
   //Timer
   Timer timer;
