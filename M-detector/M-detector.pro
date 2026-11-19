@@ -34,6 +34,7 @@ HEADERS += \
     m-detector/DynObjCluster.h \
     m-detector/DynObjFilter.h \
    parallel_q.h \
+    spatial_index_validation.h \
    types.h
 
 SOURCES += \

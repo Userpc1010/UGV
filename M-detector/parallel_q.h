@@ -38,6 +38,7 @@ PARALLEL_Q<T>::PARALLEL_Q(int len)
 {
     Q_LEN = len;
     q = new T[Q_LEN];
+    is_empty = true;
     initialized = true;
 }
 
@@ -52,6 +53,7 @@ void PARALLEL_Q<T>::init(int len)
 {
     Q_LEN = len;
     q = new T[Q_LEN];
+    is_empty = true;
     initialized = true;
 }
 

@@ -35,7 +35,7 @@ struct bbox_t
 {
     std::vector<std::vector<int>>                          Point_indices;
     std::vector<pcl::PointCloud<MD_PointType>>                Point_cloud;
-    pcl::PointCloud<MD_PointType>::Ptr                        Points;
+    pcl::PointCloud<MD_PointType>::Ptr                        Points = nullptr;
     std::vector<BBoxPose>                                  Center;
     std::vector<pcl::PointCloud<MD_PointType>>                Ground_points;
     std::vector<pcl::PointCloud<MD_PointType>>                true_ground;
@@ -58,6 +58,7 @@ struct bbox_t
       OOBB_Min_point.clear();
       OOBB_Max_point.clear();
       OOBB_R.clear();
+      umap_points_num.clear();
     }
 };
 

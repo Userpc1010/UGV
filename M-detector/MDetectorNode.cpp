@@ -17,6 +17,17 @@ void MDetectorNode::onPointCloud(const float* body_pcl, uint32_t size_pcl,
 {
     if (size_pcl == 0 || !body_pcl || !T_arr_16) return;
 
+    // ===== DEBUG: вход в onPointCloud =====
+    static int frame_cnt = 0;
+    if (frame_cnt % 10 == 0) {
+        std::cout << "[MDetNode] frame=" << frame_cnt
+                  << " size=" << size_pcl
+                  << " scan_stamp=" << scan_stamp
+                  << std::endl;
+    }
+    frame_cnt++;
+    // ===== /DEBUG =====
+
     // 1. Копируем T_arr_16 к себе
     std::memcpy(T_arr_saved_, T_arr_16, 16 * sizeof(float));
 
@@ -41,6 +52,18 @@ void MDetectorNode::onPointCloud(const float* body_pcl, uint32_t size_pcl,
     // 4. Фильтр
     filter_->filter(body_pc, R, t, scan_stamp);
 
+    // ===== DEBUG: после filter() =====
+    if (frame_cnt % 10 == 0) {
+        std::cout << "[MDetNode] after filter: dyn=" << filter_->laserCloudDynObj->size()
+                  << " stead=" << filter_->laserCloudSteadObj->size()
+                  << " dyn_clus=" << filter_->laserCloudDynObj_clus->size()
+                  << " stead_clus=" << filter_->laserCloudSteadObj_clus->size()
+                  << " cluster_coupled=" << filter_->cluster_coupled
+                  << " cluster_future=" << filter_->cluster_future
+                  << std::endl;
+    }
+    // ===== /DEBUG =====
+
     // 5. Статика (world) → body
     auto stead_world = (filter_->cluster_coupled || filter_->cluster_future)
         ? pcl::make_shared<pcl::PointCloud<pcl::PointXYZINormal>>(*filter_->laserCloudSteadObj_clus)
@@ -51,13 +74,21 @@ void MDetectorNode::onPointCloud(const float* body_pcl, uint32_t size_pcl,
     stead_data_ = new float[stead_size_ * 3];
     for (size_t i = 0; i < stead_world->size(); i++) {
         const auto& p = stead_world->points[i];
-        Eigen::Vector3d p_b = R.transpose() * (Eigen::Vector3d(p.x, p.y, p.z) - t); // world → body
+        Eigen::Vector3d p_b = (Eigen::Vector3d(p.x, p.y, p.z) - t); // world → body
         stead_data_[i*3+0] = (float)p_b.x();
         stead_data_[i*3+1] = (float)p_b.y();
         stead_data_[i*3+2] = (float)p_b.z();
     }
     stead_guard_ = true;
-    emit staticPointsReady(stead_data_, stead_size_, T_arr_saved_);
+
+    // ===== DEBUG: перед emit =====
+        if (frame_cnt % 10 == 0) {
+            std::cout << "[MDetNode] emit static: size=" << stead_size_
+                      << " state_windosw=" << (int)state_windosw
+                      << std::endl;
+        }
+        // ===== /DEBUG =====
+        emit staticPointsReady(stead_data_, stead_size_, T_arr_saved_);
 
     // 6. Динамика
     if (state_windosw == 2) {
@@ -76,6 +107,12 @@ void MDetectorNode::onPointCloud(const float* body_pcl, uint32_t size_pcl,
             dyn_data_[i*3+2] = p.z;
         }
         dyn_guard_ = true;
+        // ===== DEBUG: перед emit dynamic =====
+        if (frame_cnt % 10 == 0) {
+            std::cout << "[MDetNode] emit dynamic: size=" << dyn_size_
+                      << std::endl;
+        }
+        // ===== /DEBUG =====
         emit dynamicPointsReady(dyn_data_, dyn_size_, T_arr_saved_);
     }
 }

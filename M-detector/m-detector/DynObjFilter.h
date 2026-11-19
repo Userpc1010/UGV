@@ -13,6 +13,7 @@
 #include <pcl/point_types.h>
 #include <pcl/filters/voxel_grid.h>
 #include <Eigen/LU>
+#include "spatial_index_validation.h"
 #include <m-detector/DynObjCluster.h>
 #include <parallel_q.h>
 #include <algorithm>
@@ -506,9 +507,10 @@ public:
     void filter(PointCloudXYZI::Ptr feats_undistort, const M3D & rot_end, const V3D & pos_end, const double & scan_end_time);
     void set_path(string file_path, string file_path_origin);
 
+    int   wrap_index(int v, int n);
     void  Points2Buffer(vector<point_soph*> &points, std::vector<int> &index_vector);
     void  Buffer2DepthMap(double cur_time);
-    void  SphericalProjection(point_soph &p, int depth_index, const M3D &rot, const V3D &transl, point_soph &p_spherical);
+    bool  SphericalProjection(point_soph &p, int depth_index, const M3D &rot, const V3D &transl, point_soph &p_spherical);
     bool  Case1(point_soph & p);
     bool  Case1Enter(const point_soph & p, const DepthMap &map_info);
     bool  Case1FalseRejection(point_soph & p, const DepthMap &map_info);

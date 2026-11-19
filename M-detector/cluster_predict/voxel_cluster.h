@@ -26,10 +26,17 @@ struct Point_Cloud {
     int points_num{0};
     pcl::PointCloud<MD_PointType>::Ptr cloud;
     boost::shared_ptr<std::vector<int>> cloud_index;
+
     Point_Cloud(MD_PointType point, int index)
     {
-        this->cloud->points.push_back(point);
+        this->cloud.reset(new pcl::PointCloud<MD_PointType>());
+        this->cloud->reserve(5);
+        this->cloud->push_back(point);
+        this->cloud_index.reset(new std::vector<int>());
+        this->cloud_index->reserve(5);
+        this->cloud_index->push_back(index);
         this->bbox_index = index;
+        this->points_num = 1;
     }
 
     Point_Cloud(int index)
@@ -141,10 +148,12 @@ public:
             tmp.intensity = 0;
             // VOXEL voxel(floor(tmp.x/Voxel_revolusion), floor(tmp.y/Voxel_revolusion), floor(tmp.z/Voxel_revolusion));
             int position = floor((tmp.x - xyz_origin(0))/Voxel_revolusion) * Grid_edge_size_xy * Grid_edge_size_z + floor((tmp.y - xyz_origin(1))/Voxel_revolusion) * Grid_edge_size_z + floor((tmp.z- xyz_origin(2))/Voxel_revolusion);
-            if(position < 0 || position > Grid_edge_size_xy* Grid_edge_size_xy* Grid_edge_size_z) continue;
+            if(position < 0 || position >= Grid_edge_size_xy* Grid_edge_size_xy* Grid_edge_size_z) continue;
             if (umap_in[position].points_num > 0)
             {
                 // umap[voxel].cloud.push_back(tmp);
+                umap_in[position].cloud->push_back(tmp);
+                umap_in[position].cloud_index->push_back(i);
                 umap_in[position].points_num = umap_in[position].points_num + 1;
                 continue;
             }
@@ -155,7 +164,11 @@ public:
                 voxel_set.insert(position);
                 // umap_in[voxel] = new Point_Cloud(-1);
                 umap_in[position].cloud.reset(new pcl::PointCloud<MD_PointType>());
+                umap_in[position].cloud->reserve(5);
+                umap_in[position].cloud->push_back(tmp);
                 umap_in[position].cloud_index.reset(new std::vector<int>());
+                umap_in[position].cloud_index->reserve(5);
+                umap_in[position].cloud_index->push_back(i);
                 umap_in[position].points_num = 1;
             }    
         }
@@ -171,7 +184,7 @@ public:
             tmp.z = points_.points[i].z;
             tmp.intensity = 0;
             int position = floor((tmp.x - xyz_origin(0))/Voxel_revolusion) * Grid_edge_size_xy * Grid_edge_size_z + floor((tmp.y - xyz_origin(1))/Voxel_revolusion) * Grid_edge_size_z + floor((tmp.z - xyz_origin(2))/Voxel_revolusion);
-            if(position < 0 || position > Grid_edge_size_xy* Grid_edge_size_xy* Grid_edge_size_z) continue;
+            if(position < 0 || position >= Grid_edge_size_xy* Grid_edge_size_xy* Grid_edge_size_z) continue;
             if (umap_in[position].points_num > 0)
             {   
                 umap_in[position].cloud->push_back(tmp);
@@ -206,7 +219,7 @@ public:
             tmp.y = points_.points[i].y;
             tmp.z = points_.points[i].z;
             int position = floor((tmp.x - xyz_origin(0))/Voxel_revolusion) * Grid_edge_size_xy * Grid_edge_size_z + floor((tmp.y - xyz_origin(1))/Voxel_revolusion) * Grid_edge_size_z + floor((tmp.z - xyz_origin(2))/Voxel_revolusion);
-            if(position < 0 || position > Grid_edge_size_xy* Grid_edge_size_xy* Grid_edge_size_z) continue;
+            if(position < 0 || position >= Grid_edge_size_xy* Grid_edge_size_xy* Grid_edge_size_z) continue;
             if (umap.count(position))
             {   
                 umap[position]->cloud->push_back(tmp);
@@ -240,7 +253,7 @@ public:
                     if (neighbor_dis - (float) max_range < 0.001f)
                     {
                         int voxel_neighbor = voxel + x_neighbor * Grid_edge_size_xy*Grid_edge_size_z + y_neighbor * Grid_edge_size_z + z_neighbor;
-                        if(voxel_neighbor < 0 || voxel_neighbor > Grid_edge_size_xy* Grid_edge_size_xy* Grid_edge_size_z) continue;
+                        if(voxel_neighbor < 0 || voxel_neighbor >= Grid_edge_size_xy* Grid_edge_size_xy* Grid_edge_size_z) continue;
                         if (voxel_set.count(voxel_neighbor) && !voxel_added.count(voxel_neighbor))
                         {   
                             // std::cout << "voxel neightbor: " << voxel_neighbor << std::endl;

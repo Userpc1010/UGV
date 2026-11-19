@@ -224,7 +224,7 @@ void DynObjCluster::PubClusterResult_voxel(std::vector<int> &dyn_tag,
                 {    
                     kk += (k%2 ? 1:-1) * k;
                     int voxel = voxel_center + ii * GridMapedgesize_xy * GridMapedgesize_z + jj * GridMapedgesize_z + kk;
-                    if(voxel < 0 || voxel > GridMapsize) continue;
+                    if (voxel < 0 || voxel >= GridMapsize) continue;
                     XYZExtract(voxel, xyz);
                     Eigen::Vector3f voxel_loc(xyz(0) + 0.5f * Voxel_revolusion, xyz(1) + 0.5f * Voxel_revolusion, xyz(2) + 0.5f * Voxel_revolusion);
                     if (umap[voxel].points_num == 0 && !((voxel_loc(0) > min.x && voxel_loc(0) < max.x) && (voxel_loc(1) > min.y && voxel_loc(1) < max.y) && (voxel_loc(2) > min.z && voxel_loc(2) < max.z)))
@@ -255,7 +255,7 @@ void DynObjCluster::PubClusterResult_voxel(std::vector<int> &dyn_tag,
         if (dyn_tag[ite] == -1)
             continue;
         int voxel = floor((raw_point[ite].x - xyz_origin(0)) / Voxel_revolusion) * GridMapedgesize_xy * GridMapedgesize_z + floor((raw_point[ite].y - xyz_origin(1)) / Voxel_revolusion) * GridMapedgesize_z + floor((raw_point[ite].z - xyz_origin(2)) / Voxel_revolusion);
-        if (voxel < 0 || voxel > GridMapsize)
+        if (voxel < 0 || voxel >= GridMapsize)
         {
             continue;
         }
@@ -316,9 +316,12 @@ void DynObjCluster::PubClusterResult_voxel(std::vector<int> &dyn_tag,
     auto t3 = std::chrono::steady_clock::now();
     std::vector<double> ground_estimate_total_time(index_bbox.size(), 0.0);
     std::vector<double> region_growth_time(index_bbox.size(), 0.0);
+
+    std::vector<pcl::PointCloud<MD_PointType>> cluster_points_local(index_bbox.size());
+    std::vector<pcl::PointCloud<MD_PointType>> true_ground_local(index_bbox.size());
     std::for_each(std::execution::par, index_bbox.begin(), index_bbox.end(), [&](const int &k)
     {   
-        // СТАЛО:
+
         BBoxPose center = bbox.Center[k];
         float x_size = center.size.x();
         float y_size = center.size.y();
@@ -354,9 +357,14 @@ void DynObjCluster::PubClusterResult_voxel(std::vector<int> &dyn_tag,
         }
         else
         {
-            cluster_points += bbox.Point_cloud[k];
-            true_ground += bbox.true_ground[k];
+            cluster_points_local[k] = bbox.Point_cloud[k];
+            true_ground_local[k]    = bbox.true_ground[k];
         } });
+    for (size_t idx = 0; idx < cluster_points_local.size(); idx++) {
+        cluster_points += cluster_points_local[idx];
+        true_ground    += true_ground_local[idx];
+    }
+
     double total_ground_estimate_total_time=0.0;
     double total_region_growth_time=0.0;
     for(int i = 0; i< index_bbox.size(); i++)
@@ -384,8 +392,8 @@ void DynObjCluster::PubClusterResult_voxel(std::vector<int> &dyn_tag,
 
 bool DynObjCluster::ground_estimate(const pcl::PointCloud<MD_PointType> &ground_pcl, const Eigen::Vector3f &world_z, Eigen::Vector3f &ground_norm, Eigen::Vector4f &ground_plane, pcl::PointCloud<MD_PointType> &true_ground, std::unordered_set<int> &extend_pixels)
 {
-    if (!ground_pcl.size() > 0)
-        return false;
+    if (ground_pcl.empty()) return false;
+
     int BNUM = std::max(4, (int)ground_pcl.size() / 100);
     const float thershold = 0.10f;
     const float max_angle_from_body = 30.0f / 57.3f;
@@ -702,7 +710,7 @@ void DynObjCluster::event_extend(const Eigen::Matrix3f &R, bool ground_detect,
             for (int ind = 0; ind < 6; ind++)
             {
                 int voxel_neighbor = voxel_cur + x_ind[ind] * GridMapedgesize_xy * GridMapedgesize_z + y_ind[ind] * GridMapedgesize_z + z_ind[ind];
-                if (voxel_neighbor < 0 || voxel_neighbor > GridMapsize)
+                if (voxel_neighbor < 0 || voxel_neighbor >= GridMapsize)
                     continue;
                 if ((umap_insidebox[voxel_neighbor].bbox_index > -1 && umap_insidebox[voxel_neighbor].points_num > 0 && umap_insidebox[voxel_neighbor].bbox_index == bbox_index) || (umap[voxel_neighbor].points_num > 0 && umap[voxel_neighbor].cloud->size() > 0 && umap[voxel_neighbor].bbox_index == bbox_index))
                 {
@@ -747,6 +755,7 @@ bool DynObjCluster::esti_plane(Eigen::Vector4f &pca_result, const pcl::PointClou
     }
     Eigen::Vector3f normvec = A.colPivHouseholderQr().solve(b);
     float norm = normvec.norm();
+    if (norm < 1e-6f) return false;
     float average_dis = 0.0;
     for (int j = 0; j < point_size; j++)
     {
