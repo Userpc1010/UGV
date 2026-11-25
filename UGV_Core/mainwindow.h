@@ -9,7 +9,7 @@
 #include "WidgetLidar.h"
 #include "WidgetCostMap.h"
 #include "WidgetDynamic.h"
-#include "MDetectorNode.h"
+#include "obstacle_detector_node.h"
 #include "rgbd_camera.h"
 #include "quadbike_controller.h"
 #include "livoxsdk.h"
@@ -56,7 +56,7 @@ private:
     quadbike_controller * controller;
     LivoxSDK * SDK;
     TcpServer * Server;
-    MDetectorNode * mdetector;
+    ObstacleDetectorNode * NodeDetector;
 
     Ui::MainWindow *ui;
     QStackedWidget * stackedWidget;

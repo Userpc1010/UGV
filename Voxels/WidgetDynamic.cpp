@@ -8,7 +8,7 @@ WidgetDynamic::WidgetDynamic(QWidget *parent)
     , m_PointRender(new PointRender())
 {
     m_RoverScale = 10.0f;
-    m_camera->SetPositionCamera(QVector3D(-100.0f, 100.0f, 0.0f));
+    m_camera->SetPositionCamera(QVector3D(-1000.0f, 1000.0f, 0.0f));
 }
 
 WidgetDynamic::~WidgetDynamic()

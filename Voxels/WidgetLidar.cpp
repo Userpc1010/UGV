@@ -10,7 +10,7 @@ WidgetLidar::WidgetLidar(QWidget *parent)
 {
     // Увеличиваем масштаб ровера для режима лидара
     m_RoverScale = 10.0f;
-    m_camera->SetPositionCamera(QVector3D(-100.0f, 100.0f, 0.0f));
+    m_camera->SetPositionCamera(QVector3D(-1000.0f, 1000.0f, 0.0f));
 }
 
 WidgetLidar::~WidgetLidar()

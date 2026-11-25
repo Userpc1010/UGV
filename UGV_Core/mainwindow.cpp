@@ -19,8 +19,8 @@ MainWindow::MainWindow(QWidget *parent) :
   std::string config_path = "/home/sencis/build-UGV-Desktop-Debug/FAST-LIO2/MID360_config.json";
 
   thread_MDetector = new QThread(this);
-  mdetector = new MDetectorNode(nullptr);
-  mdetector->moveToThread(thread_MDetector);
+  NodeDetector = new ObstacleDetectorNode(nullptr);
+  NodeDetector->moveToThread(thread_MDetector);
   thread_MDetector->start(QThread::HighPriority);
 
   thread_Lidar = new QThread(this);
@@ -116,11 +116,11 @@ MainWindow::MainWindow(QWidget *parent) :
 
     connect(this, SIGNAL(destroyed(QObject*)),                                                                                                   thread_Processor, SLOT(quit()));
 
-    connect(&SDK->Node, SIGNAL(point_cloud_lidar(const float*, uint32_t, const float*, double)),                                                 mdetector, SLOT(onPointCloud(const float*, uint32_t, const float*, double)));
+    connect(&SDK->Node, SIGNAL(point_cloud_lidar(const float*, uint32_t, const float*, double)),                                                 NodeDetector, SLOT(onPointCloud(const float*, uint32_t, const float*, double)));
 
-    connect(mdetector, SIGNAL(staticPointsReady(const float*, uint32_t, const float*)),                                                          processor, SLOT(point_cloud_lidar(const float*, uint32_t, const float*)));
+    connect(NodeDetector, SIGNAL(staticPointsReady(const float*, uint32_t, const float*)),                                                       processor, SLOT(point_cloud_lidar(const float*, uint32_t, const float*)));
 
-    connect(mdetector, SIGNAL(dynamicPointsReady(const float*, uint32_t, const float*)),                                                         widgetDynamic, SLOT(DisplayingDynamicPoints(const float*, uint32_t, const float*)));
+    connect(NodeDetector, SIGNAL(dynamicPointsReady(const float*, uint32_t, const float*)),                                                      widgetDynamic, SLOT(DisplayingDynamicPoints(const float*, uint32_t, const float*)));
 
     connect(&SDK->Node, SIGNAL(odometry_lidar(odometry)),                                                                                        processor,SLOT(odometry_lidar(odometry)));
 
@@ -164,7 +164,7 @@ MainWindow::MainWindow(QWidget *parent) :
 
     connect(this, SIGNAL(WindowState(uint8_t)),                                                                                                  &SDK->Node, SLOT(WindowState(uint8_t)));
 
-    connect(this, SIGNAL(WindowState(uint8_t)),                                                                                                  mdetector, SLOT(WindowState(uint8_t)));
+    connect(this, SIGNAL(WindowState(uint8_t)),                                                                                                  NodeDetector, SLOT(WindowState(uint8_t)));
 
 
 }
